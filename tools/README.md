@@ -1,6 +1,9 @@
-# Strumenti condivisi (riferimenti; non installati qui)
+# Strumenti del metodo
 
-- [REA — Reverse Engineer Anything](https://github.com/morluto/rea): analisi con evidenze, nei limiti applicabili.
-- GrillMe: interrogazione mirata dei requisiti e dei fix; scegliere/verificare la variante prima di installarla.
+- `dispatch.py`: instrada un compito verso Claude Code o Codex; anteprima predefinita.
+- `validate.py`: verifica formato, percorsi nella repo, esiti dichiarati.
+- `setup-rea.ps1`: anteprima di configurazione REA (PowerShell); `-Apply` applica dopo conferma interattiva.
 
-Non copiare codice proprietario; ricostruire solo implementazioni originali. Nessun MCP è automaticamente attivo perché citato qui.
+REA è software esterno: [morluto/rea](https://github.com/morluto/rea). La configurazione usa il pacchetto ufficiale `rea-agents@6.9.0` e registra MCP per `claude_code` e `codex` senza duplicare il codice né reinstallare Node. Il server sarà **operativo solo dopo** setup e verifica sul PC; non è verificabile dalla repository. Comando di controllo: `npx rea-agents@6.9.0 doctor --client claude_code --client codex --json` (solo dopo setup). Non usare REA per compiti ordinari.
+
+Nessuna modifica a LUMI, altri progetti o configurazioni locali finché lo script non viene eseguito esplicitamente sul computer.
