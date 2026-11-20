@@ -1,0 +1,84 @@
+# Mostra una rilevazione dei processi e della RAM privata. Esempio : .\Mostra-Ram.ps1 | Format-Table
+$ErrorActionPreference = 'Stop'
+
+$before = @{}
+Get-CimInstance Win32_Process -Property ProcessId, CreationDate | ForEach-Object {
+    $before[[uint32]$_.ProcessId] = $_.CreationDate
+}
+
+$memory = @{}
+Get-CimInstance Win32_PerfRawData_PerfProc_Process -Property IDProcess, WorkingSetPrivate | ForEach-Object {
+    if ($_.IDProcess -gt 0 -and $null -ne $_.WorkingSetPrivate) {
+        $memory[[uint32]$_.IDProcess] = [uint64]$_.WorkingSetPrivate
+    }
+}
+
+$byId = @{}
+$fileInfo = @{}
+foreach ($process in Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CreationDate, ExecutablePath, Name) {
+    $id = [uint32]$process.ProcessId
+    $path = $process.ExecutablePath
+    $bytes = $null
+    if ($process.CreationDate -and $before[$id] -eq $process.CreationDate -and $memory.ContainsKey($id)) {
+        $bytes = $memory[$id]
+    }
+
+    if ($path -and -not $fileInfo.ContainsKey($path)) {
+        $fileInfo[$path] = $null
+        try {
+            $fileInfo[$path] = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($path)
+        } catch [System.IO.IOException] {
+            # Il file potrebbe essere scomparso dopo la rilevazione.
+        } catch [System.UnauthorizedAccessException] {
+            # Il percorso resta disponibile per identificare il processo.
+        }
+    }
+    $info = if ($path) { $fileInfo[$path] }
+    $byId[$id] = [pscustomobject]@{
+        Id = $id
+        ParentId = [uint32]$process.ParentProcessId
+        Started = $process.CreationDate
+        Name = $process.Name
+        Path = $path
+        Directory = if ($path) { [IO.Path]::GetDirectoryName($path) }
+        Product = $info.ProductName
+        Publisher = $info.CompanyName
+        Bytes = $bytes
+    }
+}
+
+$byId.Values | Group-Object {
+    $member = $_
+    if (-not $member.Path) { return "pid:$($member.Id)" }
+    $parent = $byId[$member.ParentId]
+    while ($parent -and $parent.Started -and $member.Started -and
+        $parent.Started -lt $member.Started -and
+        $member.Product -and $member.Publisher -and
+        $parent.Product -eq $member.Product -and $parent.Publisher -eq $member.Publisher -and
+        $parent.Directory -eq $member.Directory) {
+        $member = $parent
+        $parent = $byId[$member.ParentId]
+    }
+    $member.Path
+} | ForEach-Object {
+    $members = $_.Group
+    $measured = @($members | Where-Object { $null -ne $_.Bytes })
+    $reference = $members | Where-Object Path -EQ $_.Name | Select-Object -First 1
+    $label = 'App da identificare'
+    if ($reference) {
+        $label = $reference.Name
+        if ($reference.Product) { $label = $reference.Product }
+    }
+    $totalBytes = $null
+    if ($measured.Count) {
+        $totalBytes = [uint64]0
+        foreach ($item in $measured) { $totalBytes += $item.Bytes }
+    }
+    [pscustomobject]@{
+        Applicazione = $label
+        Eseguibile = $reference.Path
+        Processi = @($members | Sort-Object Id | Select-Object Id, Name, Path, Bytes)
+        RamPrivataByte = $totalBytes
+        TotaleParziale = $measured.Count -lt $members.Count
+    }
+} | Sort-Object RamPrivataByte -Descending
