@@ -47,6 +47,52 @@ foreach ($process in Get-CimInstance Win32_Process -Property ProcessId, ParentPr
     }
 }
 
+# Legge le installazioni correnti per riconoscere anche programmi aggiunti in seguito.
+$installations = @{}
+$ambiguousRoots = @{}
+$uninstallKeys = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+$unsafeRoots = @(
+    $env:SystemDrive, $env:windir, $env:ProgramFiles, ${env:ProgramFiles(x86)}
+    $env:ProgramData, $env:USERPROFILE, $env:LOCALAPPDATA, $env:APPDATA
+    (Join-Path $env:LOCALAPPDATA 'Programs')
+    (Join-Path $env:ProgramFiles 'Common Files')
+    (Join-Path $env:ProgramFiles 'WindowsApps')
+)
+foreach ($entry in Get-ItemProperty -Path $uninstallKeys -ErrorAction SilentlyContinue) {
+    if (-not $entry.DisplayName -or -not $entry.InstallLocation -or $entry.SystemComponent -eq 1) { continue }
+    $location = [Environment]::ExpandEnvironmentVariables(([string]$entry.InstallLocation).Trim().Trim('"'))
+    if ($location -notmatch '^[A-Za-z]:\\') { continue }
+    try {
+        $root = [IO.Path]::GetFullPath($location).TrimEnd('\')
+    } catch [System.ArgumentException], [System.NotSupportedException], [System.IO.PathTooLongException] {
+        continue
+    }
+    if ($root -in $unsafeRoots -or $root.Length -le 3) { continue }
+    if ($installations.ContainsKey($root) -and $installations[$root] -ne $entry.DisplayName) {
+        $ambiguousRoots[$root] = $true
+    }
+    $installations[$root] = [string]$entry.DisplayName
+}
+
+$installRoots = @($installations.Keys | Sort-Object Length -Descending)
+$installationByPath = @{}
+foreach ($member in $byId.Values) {
+    if (-not $member.Path -or $installationByPath.ContainsKey($member.Path)) { continue }
+    $installationByPath[$member.Path] = $null
+    foreach ($root in $installRoots) {
+        if ($member.Path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            if (-not $ambiguousRoots.ContainsKey($root)) {
+                $installationByPath[$member.Path] = $root
+            }
+            break
+        }
+    }
+}
+
 # I componenti Codex distribuiti fuori dal pacchetto possono essere privi di metadati.
 $codexRoot = [Environment]::GetFolderPath('LocalApplicationData') + '\OpenAI\Codex\bin\'
 $packagesRoot = [regex]::Escape((Join-Path $env:ProgramFiles 'WindowsApps'))
@@ -72,6 +118,8 @@ $byId.Values | Group-Object {
         $member = $parent
         $parent = $byId[$member.ParentId]
     }
+    $root = $installationByPath[$member.Path]
+    if ($root) { return "install:$root" }
     $member.Path
 } | ForEach-Object {
     $members = $_.Group
@@ -82,6 +130,11 @@ $byId.Values | Group-Object {
         $label = $reference.Name
         if ($reference.Product) { $label = $reference.Product }
     }
+    $installation = $null
+    if ($_.Name.StartsWith('install:', [StringComparison]::Ordinal)) {
+        $installation = $_.Name.Substring('install:'.Length)
+        $label = $installations[$installation]
+    }
     $totalBytes = $null
     if ($measured.Count) {
         $totalBytes = [uint64]0
@@ -90,6 +143,7 @@ $byId.Values | Group-Object {
     [pscustomobject]@{
         Applicazione = $label
         Eseguibile = $reference.Path
+        CartellaInstallazione = $installation
         Processi = @($members | Sort-Object Id | Select-Object Id, Name, Path, Bytes)
         RamPrivataByte = $totalBytes
         TotaleParziale = $measured.Count -lt $members.Count
