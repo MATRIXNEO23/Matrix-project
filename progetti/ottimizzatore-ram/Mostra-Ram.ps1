@@ -47,15 +47,28 @@ foreach ($process in Get-CimInstance Win32_Process -Property ProcessId, ParentPr
     }
 }
 
+# I componenti Codex distribuiti fuori dal pacchetto possono essere privi di metadati.
+$codexRoot = [Environment]::GetFolderPath('LocalApplicationData') + '\OpenAI\Codex\bin\'
+$packagesRoot = [regex]::Escape((Join-Path $env:ProgramFiles 'WindowsApps'))
+$codexApp = '^' + $packagesRoot + '\\OpenAI\.Codex_[^\\]+__2p2nqsd0c76g0\\app\\ChatGPT\.exe\z'
+$codexHelpers = @('codex.exe', 'codex-code-mode-host.exe')
+
 $byId.Values | Group-Object {
     $member = $_
     if (-not $member.Path) { return "pid:$($member.Id)" }
     $parent = $byId[$member.ParentId]
     while ($parent -and $parent.Started -and $member.Started -and
-        $parent.Started -lt $member.Started -and
-        $member.Product -and $member.Publisher -and
-        $parent.Product -eq $member.Product -and $parent.Publisher -eq $member.Publisher -and
-        $parent.Directory -eq $member.Directory) {
+        $parent.Started -lt $member.Started -and $parent.Path) {
+        $sameProduct = $member.Product -and $member.Publisher -and
+            $parent.Product -eq $member.Product -and $parent.Publisher -eq $member.Publisher -and
+            $parent.Directory -eq $member.Directory
+
+        $codexHelper = $member.Name -in $codexHelpers -and
+            $member.Path.StartsWith($codexRoot, [StringComparison]::OrdinalIgnoreCase)
+        $codexParent = $parent.Path -match $codexApp -or
+            ($parent.Name -eq 'codex.exe' -and $parent.Directory -eq $member.Directory)
+        if (-not ($sameProduct -or ($codexHelper -and $codexParent))) { break }
+
         $member = $parent
         $parent = $byId[$member.ParentId]
     }
