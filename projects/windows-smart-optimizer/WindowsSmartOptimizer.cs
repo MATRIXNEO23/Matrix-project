@@ -116,7 +116,11 @@ internal static class Optimizer
             try
             {
                 try { new PriorityAction(state).Restore(); }
-                finally { new PowerPlanAction(state).Restore(); }
+                finally
+                {
+                    try { new PowerPlanAction(state).Restore(); }
+                    finally { new WindowAction(state).Restore(); }
+                }
                 return 0;
             }
             catch (Exception) { return 1; }
@@ -609,6 +613,153 @@ internal sealed class PowerPlanAction
     }
 }
 
+internal sealed class WindowAction
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Placement
+    {
+        public int Length, Flags, Show,
+            MinX, MinY, MaxX, MaxY, Left, Top, Right, Bottom;
+    }
+
+    [DllImport("user32.dll")] private static extern bool GetWindowPlacement(IntPtr window, ref Placement value);
+    [DllImport("user32.dll")] private static extern bool SetWindowPlacement(IntPtr window, ref Placement value);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint owner);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr command, IntPtr argument,
+        uint flags, uint milliseconds, out UIntPtr result);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool SetProp(IntPtr window, string key, IntPtr value);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetProp(IntPtr window, string key);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr RemoveProp(IntPtr window, string key);
+
+    private readonly string journal;
+    public WindowAction(string folder) { journal = Path.Combine(folder, "window.pending"); }
+    public bool Pending { get { return File.Exists(journal); } }
+
+    private void Locked(Action action)
+    {
+        using (var mutex = new Mutex(false, @"Local\Matrix.Optimizer.WindowUndo"))
+        {
+            bool entered;
+            try { entered = mutex.WaitOne(3000); }
+            catch (AbandonedMutexException) { entered = true; }
+            if (!entered) throw new IOException("Ripristino finestra occupato.");
+            try { action(); }
+            finally { mutex.ReleaseMutex(); }
+        }
+    }
+
+    private static bool Owns(IntPtr window, int id)
+    {
+        uint actual;
+        return GetWindowThreadProcessId(window, out actual) != 0 && actual == id;
+    }
+
+    public void Apply(Process process)
+    {
+        Locked(delegate
+        {
+            if (Pending) throw new InvalidOperationException("Finestra già gestita.");
+            process.Refresh();
+            if (process.HasExited || process.SessionId == 0 || PriorityAction.IsProtectedName(process.ProcessName))
+                throw new InvalidOperationException("Processo non gestibile.");
+            string file = process.MainModule.FileName;
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\') + "\\";
+            if (file.StartsWith(windows, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Finestra di sistema esclusa.");
+            IntPtr window = process.MainWindowHandle;
+            var entry = new Placement { Length = Marshal.SizeOf(typeof(Placement)) };
+            if (window == IntPtr.Zero || !Owns(window, process.Id) || !IsWindowVisible(window) ||
+                IsIconic(window) || !GetWindowPlacement(window, ref entry)) return;
+            if (entry.Show != 1 && entry.Show != 3 && entry.Show != 9) return;
+
+            string mark = "Matrix.Optimizer." + Guid.NewGuid().ToString("N");
+            string record = String.Join("\n", file, mark,
+                String.Join(",", Array.ConvertAll(new long[] { process.Id, process.StartTime.ToFileTimeUtc(),
+                    window.ToInt64(), entry.Flags, entry.Show, entry.MinX, entry.MinY, entry.MaxX, entry.MaxY,
+                    entry.Left, entry.Top, entry.Right, entry.Bottom }, x => x.ToString(CultureInfo.InvariantCulture))));
+            Directory.CreateDirectory(Path.GetDirectoryName(journal));
+            string temporary = journal + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(record);
+                using (var fileStream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+                {
+                    fileStream.Write(bytes, 0, bytes.Length);
+                    fileStream.Flush(true);
+                }
+                File.Move(temporary, journal);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+            if (process.HasExited || !Owns(window, process.Id) || !SetProp(window, mark, new IntPtr(1)))
+            {
+                File.Delete(journal);
+                throw new IOException("Impossibile confermare l'identità della finestra.");
+            }
+            UIntPtr result;
+            if (SendMessageTimeout(window, 0x0112, new UIntPtr(0xf020), IntPtr.Zero, 0x0002, 500, out result) == IntPtr.Zero)
+                throw new IOException("Risposta dalla finestra non confermata. Registro conservato per il ripristino.");
+            if (!IsIconic(window))
+            {
+                RemoveProp(window, mark);
+                File.Delete(journal);
+                throw new IOException("La finestra non si è minimizzata.");
+            }
+        });
+    }
+
+    public void Restore()
+    {
+        Locked(delegate
+        {
+            if (!Pending) return;
+            string[] lines = File.ReadAllLines(journal);
+            Guid mark;
+            if (lines.Length != 3 || !Path.IsPathRooted(lines[0]) ||
+                !lines[1].StartsWith("Matrix.Optimizer.", StringComparison.Ordinal) ||
+                !Guid.TryParseExact(lines[1].Substring("Matrix.Optimizer.".Length), "N", out mark))
+                throw new InvalidDataException("Journal finestra non valido.");
+            string[] fields = lines[2].Split(',');
+            long[] values = new long[13];
+            if (fields.Length != values.Length) throw new InvalidDataException("Posizione finestra non valida.");
+            for (int i = 0; i < values.Length; i++)
+                if (!Int64.TryParse(fields[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out values[i]))
+                    throw new InvalidDataException("Posizione finestra non valida.");
+            if (values[0] <= 0 || values[0] > Int32.MaxValue || values[2] == 0 ||
+                (values[4] != 1 && values[4] != 3 && values[4] != 9))
+                throw new InvalidDataException("Identità finestra non valida.");
+
+            int id = (int)values[0];
+            var handle = new IntPtr(values[2]);
+            if (Owns(handle, id) && GetProp(handle, lines[1]) == new IntPtr(1))
+            {
+                Process process = null;
+                try { process = Process.GetProcessById(id); }
+                catch (ArgumentException) { }
+                using (process)
+                {
+                    if (process != null && !process.HasExited && process.StartTime.ToFileTimeUtc() == values[1] &&
+                        String.Equals(process.MainModule.FileName, lines[0], StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (IsIconic(handle))
+                        {
+                            var entry = new Placement { Length = Marshal.SizeOf(typeof(Placement)), Flags = checked((int)values[3]),
+                                Show = values[4] == 3 ? 3 : 4, MinX = checked((int)values[5]), MinY = checked((int)values[6]),
+                                MaxX = checked((int)values[7]), MaxY = checked((int)values[8]), Left = checked((int)values[9]),
+                                Top = checked((int)values[10]), Right = checked((int)values[11]), Bottom = checked((int)values[12]) };
+                            if (!SetWindowPlacement(handle, ref entry)) throw new IOException("Posizione originale non ripristinata.");
+                        }
+                        RemoveProp(handle, lines[1]);
+                    }
+                }
+            }
+            File.Delete(journal);
+        });
+    }
+}
+
 internal sealed class Telemetry
 {
     [StructLayout(LayoutKind.Sequential)]
@@ -717,6 +868,7 @@ internal sealed class Dashboard : Form
 
     private readonly PriorityAction action;
     private readonly PowerPlanAction power;
+    private readonly WindowAction windowAction;
     private readonly IoCounters io = new IoCounters();
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     private readonly Label metrics = new Label(), status = new Label(), gameLabel = new Label();
@@ -729,7 +881,7 @@ internal sealed class Dashboard : Form
     private string gamePath;
     private Telemetry previous;
     private bool waitingAfterRestore;
-    private bool allowPower, powerTried;
+    private bool allowPower, powerTried, allowWindow, windowTried, priorityTried;
     private MachineInventory scanned;
     private string scanError;
     private bool loadingPreferences;
@@ -741,6 +893,7 @@ internal sealed class Dashboard : Form
     {
         this.action = action;
         power = new PowerPlanAction(action.StateFolder);
+        windowAction = new WindowAction(action.StateFolder);
         Text = "Windows Smart Optimizer";
         ClientSize = new Size(700, 588);
         MinimumSize = new Size(710, 628);
@@ -770,7 +923,14 @@ internal sealed class Dashboard : Form
         Add(shortcut, 24, 300, 650, 28);
         shortcut.CheckedChanged += delegate { UpdateShortcut(); };
         enabled.CheckedChanged += delegate { if (!enabled.Checked) Recover("Boost spento. Priorità originale ripristinata."); };
-        allow.CheckedChanged += delegate { if (!allow.Checked) Recover("Intervento disabilitato. Priorità originale ripristinata."); };
+        allow.CheckedChanged += delegate
+        {
+            if (!allow.Checked && action.Pending)
+            {
+                try { action.Restore(); status.Text = "Priorità originale ripristinata."; }
+                catch (Exception error) { status.Text = "Ripristino priorità in attesa: " + error.Message; }
+            }
+        };
         var activate = Button("Attiva Boost", ActivateBoost);
         activate.BackColor = Color.FromArgb(23, 114, 102);
         activate.Font = new Font("Segoe UI", 13, FontStyle.Bold);
@@ -789,7 +949,7 @@ internal sealed class Dashboard : Form
         allow.CheckedChanged += delegate { SavePreferences(); };
         gameLabel.Text = "Gioco non configurato";
         status.Text = "Scegli un gioco e avvia un'app secondaria da questa finestra.";
-        if (action.Pending || power.Pending) Recover("Intervento precedente ripristinato.");
+        if (action.Pending || power.Pending || windowAction.Pending) Recover("Intervento precedente ripristinato.");
         timer.Interval = 3000;
         timer.Tick += delegate { Sample(); };
         Shown += delegate { Sample(); timer.Start(); ScanMachine(); };
@@ -813,6 +973,7 @@ internal sealed class Dashboard : Form
         if (!Recover("Stato originale ripristinato.")) return;
         enabled.Checked = false;
         allowPower = false;
+        allowWindow = false;
         SetPreferences(new GamePreferences(0, false));
         SavePreferences();
         status.Text = "Profilo PC: Conservativo. Mantiene le impostazioni Windows. I confronti di Minecraft non hanno mostrato un guadagno ripetibile.";
@@ -834,6 +995,8 @@ internal sealed class Dashboard : Form
         if (!Recover("Ripristino precedente verificato.")) return;
         waitingAfterRestore = false;
         powerTried = false;
+        windowTried = false;
+        priorityTried = false;
         enabled.Checked = true;
         status.Text = "Boost attivo. Si applicano il profilo e le autorizzazioni correnti.";
     }
@@ -1035,6 +1198,7 @@ internal sealed class Dashboard : Form
         using (var dialog = new Form { Text = "Azioni Boost", Size = new Size(710, 375), StartPosition = FormStartPosition.CenterParent })
         using (var details = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true })
         using (var powerOption = new CheckBox { Text = "Prova il piano Prestazioni elevate (15 secondi, opt-in)", Dock = DockStyle.Top, Height = 33 })
+        using (var windowOption = new CheckBox { Text = "Minimizza e ripristina la finestra secondaria", Dock = DockStyle.Top, Height = 33 })
         using (var current = new Label { Dock = DockStyle.Bottom, Height = 42, Padding = new Padding(8) })
         using (var update = new System.Windows.Forms.Timer { Interval = 500 })
         using (var actionOption = new CheckBox { Text = "Consenti riduzione temporanea della priorità", Dock = DockStyle.Top, Height = 33 })
@@ -1052,11 +1216,23 @@ internal sealed class Dashboard : Form
                     catch (Exception error) { status.Text = "Ripristino energia in attesa: " + error.Message; }
                 }
             };
+            windowOption.Checked = allowWindow;
+            windowOption.CheckedChanged += delegate
+            {
+                allowWindow = windowOption.Checked;
+                if (!allowWindow && windowAction.Pending)
+                {
+                    try { windowAction.Restore(); }
+                    catch (Exception error) { status.Text = "Ripristino finestra in attesa: " + error.Message; }
+                }
+            };
             details.Columns.Add("Categoria", 144);
             details.Columns.Add("Azione", 250);
             details.Columns.Add("Stato", 280);
             var live = new ListViewItem(new[] { "Processi", "Riduci priorità app secondaria", "In attesa" });
             details.Items.Add(live);
+            var windowRow = new ListViewItem(new[] { "Finestre", "Minimizza e ripristina", "Disabilitata" });
+            details.Items.Add(windowRow);
             details.Items.Add(new ListViewItem(new[] { "Servizi Windows", "Arresto e riavvio", "Da collaudare" }));
             details.Items.Add(new ListViewItem(new[] { "Terze parti", "Servizi e attività in background", "Solo inventario" }));
             details.Items.Add(new ListViewItem(new[] { "Browser", "Pausa / recupero sessione", "Da collaudare" }));
@@ -1072,6 +1248,8 @@ internal sealed class Dashboard : Form
                     profile.SelectedIndex == 0 ? "Conservativo: solo anteprima" :
                     action.Pending ? "Priorità ridotta" : "In attesa delle condizioni";
                 live.SubItems[2].Text = state;
+                windowRow.SubItems[2].Text = windowAction.Pending ? "Richiesta inviata; ripristino in attesa" :
+                    !allowWindow ? "Disabilitata" : "Pronta con una finestra secondaria";
                 energy.SubItems[2].Text = power.Pending ? "Piano applicato, ripristino in attesa" :
                     !allowPower ? "Disabilitato" : powerTried ? "Prova conclusa o piano già attivo" : "Pronto per la prova";
                 if (optional == null || optional.HasExited)
@@ -1109,6 +1287,7 @@ internal sealed class Dashboard : Form
             dialog.Controls.Add(details);
             dialog.Controls.Add(current);
             dialog.Controls.Add(demo);
+            dialog.Controls.Add(windowOption);
             dialog.Controls.Add(powerOption);
             dialog.Controls.Add(actionOption);
             dialog.ShowDialog(this);
@@ -1316,11 +1495,15 @@ internal sealed class Dashboard : Form
 
     private bool Recover(string message)
     {
-        if (!action.Pending && !power.Pending) return true;
+        if (!action.Pending && !power.Pending && !windowAction.Pending) return true;
         try
         {
             try { action.Restore(); }
-            finally { power.Restore(); }
+            finally
+            {
+                try { power.Restore(); }
+                finally { windowAction.Restore(); }
+            }
             actionTime.Reset();
             status.Text = message;
             if (beforeAction != null)
@@ -1370,6 +1553,8 @@ internal sealed class Dashboard : Form
                 if (gameTree != null) { gameTree.Dispose(); gameTree = null; }
                 waitingAfterRestore = false;
                 powerTried = false;
+                windowTried = false;
+                priorityTried = false;
                 busySamples = 0;
                 if (!Recover("Gioco terminato. Priorità originale ripristinata.")) return;
             }
@@ -1388,6 +1573,16 @@ internal sealed class Dashboard : Form
 
             bool sessionReady = game != null && enabled.Checked && !waitingAfterRestore;
             if (!sessionReady) { Recover("Stato originale ripristinato."); return; }
+            if (windowAction.Pending && (!allowWindow || profile.SelectedIndex == 0 || watcher == null || watcher.HasExited))
+                windowAction.Restore();
+            if (allowWindow && !windowTried && profile.SelectedIndex != 0 && optional != null && !optional.HasExited &&
+                optional.MainWindowHandle != IntPtr.Zero)
+            {
+                windowTried = true;
+                EnsureWatcher();
+                windowAction.Apply(optional);
+                if (windowAction.Pending) status.Text = "Finestra secondaria minimizzata; sarà ripristinata alla fine del boost.";
+            }
             if (power.Pending)
             {
                 if (profile.SelectedIndex == 0 || !allowPower || watcher == null || watcher.HasExited) power.Restore();
@@ -1424,24 +1619,29 @@ internal sealed class Dashboard : Form
                 status.Text = "Bilanciato: attende due rilevazioni consecutive con CPU almeno al 70%.";
                 return;
             }
-            EnsureWatcher();
             if (actionTime.IsRunning && !action.Pending)
             {
-                waitingAfterRestore = true;
                 actionTime.Reset();
                 beforeAction = null;
-                status.Text = "Intervento terminato dal controllo di ripristino.";
+                status.Text = "Priorità ripristinata dal watchdog. Le altre azioni seguono la sessione.";
                 return;
             }
             if (action.Pending)
             {
+                EnsureWatcher();
                 if (actionTime.Elapsed.TotalSeconds >= 15)
                 {
-                    waitingAfterRestore = true;
-                    Recover("Intervento concluso dopo 15 secondi. Priorità ripristinata.");
+                    action.Restore();
+                    actionTime.Reset();
+                    if (beforeAction != null) action.Record("ripristinato", beforeAction, now);
+                    beforeAction = null;
+                    status.Text = "Priorità ripristinata dopo 15 secondi. Le altre azioni seguono la sessione.";
                 }
                 return;
             }
+            if (priorityTried) return;
+            EnsureWatcher();
+            priorityTried = true;
             action.Apply(optional);
             if (action.Pending) actionTime.Restart();
             beforeAction = action.Pending ? now : null;
