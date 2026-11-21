@@ -1,8 +1,29 @@
 # Mostra una rilevazione dei processi e della RAM privata. Esempio : .\Mostra-Ram.ps1 | Format-Table
 # Per valutare le proposte: .\Mostra-Ram.ps1 -ConfermaAssociazioni
-param([switch]$ConfermaAssociazioni)
+# Per mostrare i suggerimenti oltre l'80%: .\Mostra-Ram.ps1 -SogliaRamPercento 80
+param(
+    [switch]$ConfermaAssociazioni,
+    [ValidateRange(1, 100)]
+    [int]$SogliaRamPercento
+)
 
 $ErrorActionPreference = 'Stop'
+$usaSoglia = $PSBoundParameters.ContainsKey('SogliaRamPercento')
+$caricoRam = $null
+if ($usaSoglia) {
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -Property TotalVisibleMemorySize, FreePhysicalMemory
+        if ($os.TotalVisibleMemorySize -gt 0 -and $null -ne $os.FreePhysicalMemory -and
+            $os.FreePhysicalMemory -le $os.TotalVisibleMemorySize) {
+            $caricoRam = 100 * ([decimal]$os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / $os.TotalVisibleMemorySize
+        }
+    } catch [Microsoft.Management.Infrastructure.CimException] {
+        # Mantiene disponibile la rilevazione per processo.
+    }
+    if ($null -eq $caricoRam) {
+        Write-Warning 'Carico RAM di sistema non disponibile. Suggerimenti sospesi.'
+    }
+}
 
 $before = @{}
 Get-CimInstance Win32_Process -Property ProcessId, CreationDate | ForEach-Object {
@@ -210,7 +231,7 @@ $byId.Values | Group-Object { $groups[$_.Id] } | ForEach-Object {
         $totalBytes = [uint64]0
         foreach ($item in $measured) { $totalBytes += $item.Bytes }
     }
-    [pscustomobject]@{
+    $report = [ordered]@{
         Applicazione = $label
         Eseguibile = $reference.Path
         CartellaInstallazione = $installation
@@ -219,4 +240,20 @@ $byId.Values | Group-Object { $groups[$_.Id] } | ForEach-Object {
         RamPrivataByte = $totalBytes
         TotaleParziale = $measured.Count -lt $members.Count
     }
+    if ($usaSoglia) {
+        $report.CaricoRamPercento = if ($null -ne $caricoRam) { [math]::Round($caricoRam, 2) }
+        $report.SogliaRamPercento = $SogliaRamPercento
+        $eligible = $installation -and $totalBytes -gt 0 -and -not $report.TotaleParziale
+        if ($eligible) {
+            foreach ($item in $members) {
+                if ($installationByPath[$item.Path] -ne $installation -or
+                    $item.Path.StartsWith($windowsRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                    $eligible = $false
+                    break
+                }
+            }
+        }
+        $report.DaValutare = [bool]($null -ne $caricoRam -and $caricoRam -gt $SogliaRamPercento -and $eligible)
+    }
+    [pscustomobject]$report
 } | Sort-Object RamPrivataByte -Descending
