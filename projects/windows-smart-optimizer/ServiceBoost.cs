@@ -15,7 +15,10 @@ internal sealed class ServiceBoost
     public const string Search = "WSearch";
     public const string Printing = "Spooler";
     public const string Prefetch = "SysMain";
-    private static readonly string[] Managed = { Search, Printing, Prefetch };
+    private static readonly string[] Managed = {
+        Search, Printing, Prefetch, "BITS", "FDResPub", "iphlpsvc", "PcaSvc", "TrkWks", "VaultSvc"
+    };
+    public const int ObservedIObitServices = 0x1FA;
     private readonly string folder;
     private readonly string service;
     private readonly string journal;
@@ -152,7 +155,12 @@ internal sealed class ServiceBoost
                 File.Move(staging, journal);
             }
             finally { if (File.Exists(staging)) File.Delete(staging); }
-            StopOnly(service);
+            try { StopOnly(service); }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                File.Delete(journal);
+                throw;
+            }
             controller.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(15));
         }
     }
