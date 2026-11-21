@@ -60,3 +60,27 @@ L'utente ha confermato di essere nel mondo. Due ulteriori coppie da otto secondi
 | 2 | 49,90 → 57,86 | 80 → 17 |
 
 Minecraft ha presentato 59,78–59,97 FPS in tutti e quattro i campioni. La variabilità maggiore è stata negli intervalli tra immagini visualizzate. Una coppia è peggiorata e una è migliorata. Questo test non giustifica abilitare automaticamente la riduzione di priorità per Minecraft nelle condizioni osservate.
+
+## Incremento Game Booster reversibile
+
+L'ordine [Game Booster](ORDINE_WORK_GAME_BOOSTER_OTTIMIZZAZIONE_REVERSIBILE.md) trova qui una prima integrazione. La build corrente Windows 10 x64 è di 44.544 byte. SHA-256 `3D655D49D06EC84C31D3BC15916EBC7369D51851D4BC7FEDE502292CA19E154B`. I valori nelle sezioni precedenti descrivono build storiche.
+
+- **Discovery:** `MachineInventory` legge hardware e driver, servizi, processi, browser noti, chiavi Run e attività visibili nella radice dell'Utilità di pianificazione. La scansione singola avviene fuori dal thread UI. La ricerca giochi individua Minecraft for Windows nelle installazioni XboxGames. Il selettore esistente supporta eseguibili manuali e portatili.
+- **Policy e UI:** il gioco individuato viene proposto con profilo Conservativo e boost spento. I profili salvano livello e autorizzazione all'intervento per percorso del gioco. Import ed export includono le sole opzioni e l'import tiene spento il boost. Comandi di attivazione, disattivazione e ripristino d'emergenza sono distinti. Il cambio di gioco passa prima dal ripristino. La scorciatoia resta opzionale.
+- **Transazione:** il journal dura su disco prima della modifica e include ID, PID, ora di avvio, percorso, valore originale, valore applicato e scadenza. Resta leggibile il journal precedente a tre campi. App e watchdog serializzano gli accessi. La UI attende il segnale di disponibilità del watchdog prima di agire. Il watchdog controlla la scadenza anche con la dashboard ancora attiva. Il rollback conserva un valore di priorità diverso da quello scritto dal booster.
+- **Distribuzione:** compilazione e tre prove ripetibili da `Compila.ps1 -Test`. Per il benchmark storico compilare anche `MachineInventory.cs` e aggiungere la referenza a `System.Management.dll`.
+
+| Funzione storica | Esito e prerequisito | Default | Impatto, rischio e ripristino |
+| --- | --- | --- | --- |
+| Processi / priorità | Verificata su Windows 10 con processi di prova. Solo app secondaria avviata dal booster, stessa sessione utente, priorità normale. | Conservativo; boost spento | Riduce la CPU disponibile all'app secondaria, fino alla sua temporanea quasi inattività sotto contesa. Ripristino automatico e manuale; benefici in gioco non ripetuti. |
+| Servizi Windows e terze parti, startup, task | Inventario parziale in lettura. Dipendenze, arresto e ripristino specifici da verificare. | Spento | Nessun cambiamento. |
+| Browser e Explorer | Diagnosi. Le sessioni sono da preservare. | Spento | Sospensione e recupero delle finestre non verificati. |
+| Piano energetico, affinità, worker threads, cache, Prefetch, rete, GUI, Fix bad tweak | Supporto ed effetto storico da verificare voce per voce. | Spento | Nessuna scrittura. La pulizia indiscriminata di cache e appunti resta esclusa. |
+| GPU | Diagnosi Radeon HD 6450 con driver 15.301.1901.0. API di regolazione, sensori e undo non verificati. | Sola diagnosi | Nessuna calibrazione, modifica delle frequenze o stress test. |
+| Defender, firewall, servizi di sicurezza | Esclusi. | Esclusi | Nessuna modifica alle protezioni. |
+
+### Verifiche dell'incremento
+
+Windows 10 19045, Intel Core i3-2100, Radeon HD 6450. Inventario reale: 1 gioco rilevato, 175 processi, 270 servizi, 8 voci Run. Test riusciti per due profili indipendenti, aggiornamento e rilettura, ripristino dopo la scadenza a 15,3 secondi con proprietario attivo, modifica concorrente preservata, uscita/crash sintetici e journal. La build finale ha superato tre test e ha aperto una dashboard reattiva a boost spento. Campione breve dopo la scansione: 12,41 MiB di RAM privata residente e 0,73% di un core. Non è una misura a regime su un PC con 4 GB.
+
+Restano da completare la libreria multigioco e Steam, il riconoscimento delle dipendenze e degli avvii figli, l'inventario esaustivo, i candidati preselezionati voce per voce, gli adapter aggiuntivi con undo verificato, i test di spegnimento improvviso e di privilegi, il catalogo storico completo e nuovi benchmark ripetuti. L'auto-tuning è bloccato sul PC di prova finché non sono verificati hardware, API e ripristino.
