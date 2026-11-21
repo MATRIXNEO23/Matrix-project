@@ -349,11 +349,21 @@ internal sealed class IoCounters : IDisposable
 
 internal sealed class Dashboard : Form
 {
+    private const int BoostHotkeyId = 1;
+    private const int HotkeyMessage = 0x0312;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnregisterHotKey(IntPtr window, int id);
+
     private readonly PriorityAction action;
     private readonly IoCounters io = new IoCounters();
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     private readonly Label metrics = new Label(), status = new Label(), gameLabel = new Label();
-    private readonly CheckBox enabled = new CheckBox(), allow = new CheckBox();
+    private readonly CheckBox enabled = new CheckBox(), allow = new CheckBox(), shortcut = new CheckBox();
+    private bool shortcutRegistered;
     private readonly ComboBox profile = new ComboBox();
     private readonly ResourceTrend trend = new ResourceTrend();
     private Process optional, game, watcher;
@@ -368,8 +378,8 @@ internal sealed class Dashboard : Form
     {
         this.action = action;
         Text = "Windows Smart Optimizer";
-        ClientSize = new Size(700, 385);
-        MinimumSize = new Size(710, 425);
+        ClientSize = new Size(700, 425);
+        MinimumSize = new Size(710, 465);
         BackColor = Color.FromArgb(23, 27, 35);
         ForeColor = Color.FromArgb(233, 237, 245);
         Font = new Font("Segoe UI", 10);
@@ -392,7 +402,12 @@ internal sealed class Dashboard : Form
         Add(enabled, 184, 262, 195, 28);
         allow.Text = "Riduci priorità app secondaria";
         Add(allow, 382, 262, 290, 28);
-        Add(status, 24, 309, 650, 58);
+        shortcut.Text = "Usa Ctrl+Alt+F10 per attivare o disattivare il boost";
+        Add(shortcut, 24, 300, 650, 28);
+        shortcut.CheckedChanged += delegate { UpdateShortcut(); };
+        enabled.CheckedChanged += delegate { if (!enabled.Checked) Recover("Boost spento. Priorità originale ripristinata."); };
+        allow.CheckedChanged += delegate { if (!allow.Checked) Recover("Intervento disabilitato. Priorità originale ripristinata."); };
+        Add(status, 24, 351, 650, 58);
         gameLabel.Text = "Gioco non configurato";
         status.Text = "Scegli un gioco e avvia un'app secondaria da questa finestra.";
         if (action.Pending) Recover("Intervento precedente ripristinato.");
@@ -401,6 +416,7 @@ internal sealed class Dashboard : Form
         Shown += delegate { Sample(); timer.Start(); };
         FormClosing += delegate {
             timer.Stop();
+            ReleaseShortcut();
             Recover("Priorità ripristinata.");
         };
         FormClosed += delegate {
@@ -410,6 +426,51 @@ internal sealed class Dashboard : Form
             if (game != null) game.Dispose();
             if (watcher != null) watcher.Dispose();
         };
+    }
+
+    private void UpdateShortcut()
+    {
+        if (!shortcut.Checked) { ReleaseShortcut(); return; }
+        if (shortcutRegistered) return;
+        const uint altControlNoRepeat = 0x4003;
+        shortcutRegistered = RegisterHotKey(Handle, BoostHotkeyId, altControlNoRepeat, (uint)Keys.F10);
+        if (!shortcutRegistered)
+        {
+            shortcut.Checked = false;
+            status.Text = "Ctrl+Alt+F10 non disponibile. Usa la spunta Game Booster.";
+        }
+    }
+
+    private void ReleaseShortcut()
+    {
+        if (!shortcutRegistered) return;
+        UnregisterHotKey(Handle, BoostHotkeyId);
+        shortcutRegistered = false;
+    }
+
+    protected override void WndProc(ref Message message)
+    {
+        if (message.Msg == HotkeyMessage && message.WParam.ToInt64() == BoostHotkeyId && shortcutRegistered)
+        {
+            if (game == null || game.HasExited)
+            {
+                status.Text = "Scorciatoia ignorata: nessun gioco configurato è in esecuzione.";
+                return;
+            }
+            if (enabled.Checked)
+            {
+                enabled.Checked = false;
+                if (!action.Pending) status.Text = "Game Booster spento.";
+            }
+            else
+            {
+                waitingAfterRestore = false;
+                enabled.Checked = true;
+                status.Text = "Game Booster attivo per il gioco. Si applicano il profilo e le spunte correnti.";
+            }
+            return;
+        }
+        base.WndProc(ref message);
     }
 
     private void Add(Control control, int x, int y, int width, int height)
