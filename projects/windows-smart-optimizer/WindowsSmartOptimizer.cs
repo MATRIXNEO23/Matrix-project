@@ -927,8 +927,13 @@ internal sealed class RelaunchAction
             {
                 if (existing != null && (!browser || VisibleWindows(existing.Id) > 0))
                 {
-                    File.Delete(journal);
-                    return;
+                    bool original = existing.Id == originalPid &&
+                        existing.StartTime.ToFileTimeUtc() == originalStart;
+                    if (!original || !existing.WaitForExit(750))
+                    {
+                        File.Delete(journal);
+                        return;
+                    }
                 }
             }
             string arguments = fields[1] == "demo" ? "--demo-worker" : browser ? "--restore-last-session" : "";
@@ -1119,7 +1124,8 @@ internal sealed class Dashboard : Form
         profile.Items.AddRange(new object[] { "Conservativo", "Bilanciato", "Aggressivo" });
         profile.SelectedIndex = 0;
         Add(profile, 24, 176, 148, 28);
-        Add(actionSummary, 188, 177, 365, 39);
+        Add(actionSummary, 188, 177, 218, 42);
+        Add(Button("App da chiudere", ShowBoostApps), 417, 175, 136, 34);
         Add(Button("Configura azioni", ShowBoostActions), 565, 175, 131, 34);
 
         Add(boostState, 24, 232, 670, 22);
@@ -1214,7 +1220,7 @@ internal sealed class Dashboard : Form
         }
         if (allowPower) chosen.Add("energia");
         List<string> selected;
-        if (gamePath != null && boostApps.TryGetValue(gamePath, out selected) && selected.Count > 0)
+        if (boostApps.TryGetValue(automaticSession ? gamePath ?? "" : "", out selected) && selected.Count > 0)
             chosen.Add(selected.Count + " app da chiudere");
         if (boostServices != 0) chosen.Add("servizi selezionati");
         actionSummary.Text = profile.SelectedIndex == 0 && !ManualBoost && chosen.Count == 0 ? "Conservativo · solo anteprima" :
@@ -1303,7 +1309,7 @@ internal sealed class Dashboard : Form
     private void ActivateBoost(object sender, EventArgs args)
     {
         List<string> selected;
-        if (boostServices == 0 && (!boostApps.TryGetValue(gamePath ?? "", out selected) || selected.Count == 0) &&
+        if (boostServices == 0 && (!boostApps.TryGetValue("", out selected) || selected.Count == 0) &&
             relaunchGame == null && (profile.SelectedIndex == 0 || (!allow.Checked && !allowPower && !allowWindow)))
         {
             status.Text = "Nessuna azione selezionata. Apri Configura azioni per spuntare app o servizi.";
@@ -1327,11 +1333,9 @@ internal sealed class Dashboard : Form
     {
         StopManagedService();
         waitingAfterRestore = true;
+        bool restoring = action.Pending || power.Pending || windowAction.Pending || relaunch.Pending;
+        if (!restoring) status.Text = "Boost spento.";
         enabled.Checked = false;
-        if (!action.Pending && !power.Pending && !windowAction.Pending && !relaunch.Pending)
-            status.Text = "Boost spento.";
-        else
-            Recover("Boost spento. Stato originale ripristinato.");
     }
 
     private void ScanMachine()
@@ -1960,21 +1964,29 @@ internal sealed class Dashboard : Form
             return;
         }
         List<string> selected;
-        if (!boostApps.TryGetValue(gamePath ?? "", out selected)) selected = new List<string>();
+        if (!boostApps.TryGetValue("", out selected)) selected = new List<string>();
         var paths = RunningSecondaryApps().Select(app => app.Executable).Concat(selected)
             .Distinct(StringComparer.OrdinalIgnoreCase).Where(file => IsSecondaryPath(file) && RelaunchAction.Eligible(file, false))
             .OrderBy(Path.GetFileName).ToList();
         using (var dialog = new Form { Text = "App da chiudere e riaprire", Size = new Size(730, 480), StartPosition = FormStartPosition.CenterParent })
         using (var apps = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true, HorizontalScrollbar = true })
         using (var note = new Label { Dock = DockStyle.Top, Height = 64, Text = "Salva il lavoro prima del boost. Le app selezionate vengono chiuse normalmente e riaperte come nuove istanze. Edge e Chrome con una sola finestra tentano di recuperare l’ultima sessione. Le schede private non vengono recuperate." })
-        using (var save = new Button { Text = "Salva selezione per questa sessione", Dock = DockStyle.Bottom, Height = 40, DialogResult = DialogResult.OK })
+        using (var save = new Button { Text = "Applica spunte", Dock = DockStyle.Bottom, Height = 40, DialogResult = DialogResult.OK })
         {
             foreach (string file in paths) apps.Items.Add(file, selected.Contains(file, StringComparer.OrdinalIgnoreCase));
             dialog.Controls.Add(apps);
             dialog.Controls.Add(note);
             dialog.Controls.Add(save);
+            dialog.AcceptButton = save;
             if (dialog.ShowDialog(this) == DialogResult.OK)
-                boostApps[gamePath ?? ""] = apps.CheckedItems.Cast<string>().ToList();
+            {
+                var checkedApps = apps.CheckedItems.Cast<string>().ToList();
+                boostApps[""] = checkedApps;
+                if (gamePath != null) boostApps[gamePath] = checkedApps;
+                status.Text = checkedApps.Count == 0 ? "Nessuna app selezionata." :
+                    "App selezionate: " + String.Join(", ", checkedApps.Select(Path.GetFileName));
+                RefreshPrimaryControls();
+            }
         }
     }
 
@@ -1983,7 +1995,7 @@ internal sealed class Dashboard : Form
         if (boostAppsTried || (profile.SelectedIndex == 0 && !ManualBoost)) return;
         boostAppsTried = true;
         List<string> selected;
-        if (!boostApps.TryGetValue(gamePath ?? "", out selected) || selected.Count == 0) return;
+        if (!boostApps.TryGetValue(automaticSession ? gamePath ?? "" : "", out selected) || selected.Count == 0) return;
         EnsureWatcher();
         if (watcher == null || watcher.HasExited) throw new IOException("Monitor di ripristino non disponibile.");
         batchRamBefore = before.Available;
