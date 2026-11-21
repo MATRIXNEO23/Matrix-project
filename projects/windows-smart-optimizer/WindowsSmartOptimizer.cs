@@ -84,6 +84,7 @@ internal static class Optimizer
                     if (owner.StartTime.ToFileTimeUtc() == ownerStart)
                     {
                         var transaction = new PriorityAction(state);
+                        var power = new PowerPlanAction(state);
                         try
                         {
                             using (var ready = EventWaitHandle.OpenExisting(WatchReadyName(ownerId, ownerStart)))
@@ -93,6 +94,10 @@ internal static class Optimizer
                         while (!owner.WaitForExit(1000))
                         {
                             try { transaction.RestoreExpired(DateTime.UtcNow); }
+                            catch (IOException) { }
+                            catch (UnauthorizedAccessException) { }
+                            catch (System.ComponentModel.Win32Exception) { }
+                            try { power.RestoreExpired(DateTime.UtcNow); }
                             catch (IOException) { }
                             catch (UnauthorizedAccessException) { }
                             catch (System.ComponentModel.Win32Exception) { }
@@ -108,7 +113,12 @@ internal static class Optimizer
             try { acquired = mutex.WaitOne(5000); }
             catch (AbandonedMutexException) { acquired = true; }
             if (!acquired) return 1;
-            try { new PriorityAction(state).Restore(); return 0; }
+            try
+            {
+                try { new PriorityAction(state).Restore(); }
+                finally { new PowerPlanAction(state).Restore(); }
+                return 0;
+            }
             catch (Exception) { return 1; }
             finally { mutex.ReleaseMutex(); }
         }
@@ -509,6 +519,96 @@ internal sealed class PriorityAction
     }
 }
 
+internal sealed class PowerPlanAction
+{
+    public static readonly Guid Performance = new Guid("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
+    private readonly string journal;
+    public bool Pending { get { return File.Exists(journal); } }
+
+    public PowerPlanAction(string folder) { journal = Path.Combine(folder, "power.pending"); }
+
+    [DllImport("powrprof.dll")]
+    private static extern uint PowerGetActiveScheme(IntPtr key, out IntPtr scheme);
+    [DllImport("powrprof.dll")]
+    private static extern uint PowerSetActiveScheme(IntPtr key, ref Guid scheme);
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    public static Guid Read()
+    {
+        IntPtr pointer;
+        uint error = PowerGetActiveScheme(IntPtr.Zero, out pointer);
+        if (error != 0) throw new System.ComponentModel.Win32Exception((int)error);
+        try { return (Guid)Marshal.PtrToStructure(pointer, typeof(Guid)); }
+        finally { LocalFree(pointer); }
+    }
+
+    private static void Write(Guid plan)
+    {
+        uint error = PowerSetActiveScheme(IntPtr.Zero, ref plan);
+        if (error != 0) throw new System.ComponentModel.Win32Exception((int)error);
+        if (Read() != plan) throw new IOException("Windows non ha confermato il piano energetico richiesto.");
+    }
+
+    private void Locked(Action action)
+    {
+        using (var mutex = new Mutex(false, @"Local\Matrix.Optimizer.PowerUndo"))
+        {
+            bool entered;
+            try { entered = mutex.WaitOne(3000); }
+            catch (AbandonedMutexException) { entered = true; }
+            if (!entered) throw new IOException("Ripristino del piano energetico occupato.");
+            try { action(); }
+            finally { mutex.ReleaseMutex(); }
+        }
+    }
+
+    public void Apply()
+    {
+        Locked(delegate
+        {
+            if (Pending) throw new InvalidOperationException("Piano energetico già gestito.");
+            Guid original = Read();
+            if (original == Performance) return;
+            string record = String.Join("\n", original.ToString("D"), Performance.ToString("D"),
+                DateTime.UtcNow.AddSeconds(15).Ticks.ToString(CultureInfo.InvariantCulture), Guid.NewGuid().ToString("D"));
+            Directory.CreateDirectory(Path.GetDirectoryName(journal));
+            string temporary = journal + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(record);
+                using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+                {
+                    file.Write(bytes, 0, bytes.Length);
+                    file.Flush(true);
+                }
+                File.Move(temporary, journal);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+            if (Read() != original) { File.Delete(journal); throw new IOException("Il piano è cambiato prima dell'intervento."); }
+            Write(Performance);
+        });
+    }
+
+    public void Restore() { Locked(delegate { RestoreCore(null); }); }
+    public void RestoreExpired(DateTime now) { Locked(delegate { RestoreCore(now); }); }
+
+    private void RestoreCore(DateTime? now)
+    {
+        if (!Pending) return;
+        string[] fields = File.ReadAllLines(journal);
+        Guid original, applied, session;
+        long expires;
+        if (fields.Length != 4 || !Guid.TryParseExact(fields[0], "D", out original) || original == Guid.Empty ||
+            !Guid.TryParseExact(fields[1], "D", out applied) || applied != Performance ||
+            !Int64.TryParse(fields[2], out expires) || expires <= 0 || expires > DateTime.MaxValue.Ticks ||
+            !Guid.TryParseExact(fields[3], "D", out session)) throw new InvalidDataException("Journal del piano non valido.");
+        if (now.HasValue && now.Value.Ticks < expires) return;
+        if (Read() == applied) Write(original);
+        File.Delete(journal);
+    }
+}
+
 internal sealed class Telemetry
 {
     [StructLayout(LayoutKind.Sequential)]
@@ -616,6 +716,7 @@ internal sealed class Dashboard : Form
     private static extern bool UnregisterHotKey(IntPtr window, int id);
 
     private readonly PriorityAction action;
+    private readonly PowerPlanAction power;
     private readonly IoCounters io = new IoCounters();
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     private readonly Label metrics = new Label(), status = new Label(), gameLabel = new Label();
@@ -628,6 +729,7 @@ internal sealed class Dashboard : Form
     private string gamePath;
     private Telemetry previous;
     private bool waitingAfterRestore;
+    private bool allowPower, powerTried;
     private MachineInventory scanned;
     private string scanError;
     private bool loadingPreferences;
@@ -638,9 +740,10 @@ internal sealed class Dashboard : Form
     public Dashboard(PriorityAction action)
     {
         this.action = action;
+        power = new PowerPlanAction(action.StateFolder);
         Text = "Windows Smart Optimizer";
-        ClientSize = new Size(700, 532);
-        MinimumSize = new Size(710, 572);
+        ClientSize = new Size(700, 588);
+        MinimumSize = new Size(710, 628);
         BackColor = Color.FromArgb(23, 27, 35);
         ForeColor = Color.FromArgb(233, 237, 245);
         Font = new Font("Segoe UI", 10);
@@ -668,20 +771,25 @@ internal sealed class Dashboard : Form
         shortcut.CheckedChanged += delegate { UpdateShortcut(); };
         enabled.CheckedChanged += delegate { if (!enabled.Checked) Recover("Boost spento. Priorità originale ripristinata."); };
         allow.CheckedChanged += delegate { if (!allow.Checked) Recover("Intervento disabilitato. Priorità originale ripristinata."); };
-        Add(Button("Attiva Boost", ActivateBoost), 24, 344, 140, 34);
-        Add(Button("Disattiva e ripristina", DeactivateBoost), 175, 344, 190, 34);
-        Add(Button("Analisi del PC", ShowInventory), 377, 344, 125, 34);
-        Add(Button("Ripristino d'emergenza", Restore), 514, 344, 160, 34);
+        var activate = Button("Attiva Boost", ActivateBoost);
+        activate.BackColor = Color.FromArgb(23, 114, 102);
+        activate.Font = new Font("Segoe UI", 13, FontStyle.Bold);
+        Add(activate, 24, 342, 316, 48);
+        Add(Button("Disattiva e ripristina", DeactivateBoost), 352, 342, 322, 48);
+        Add(Button("Analisi del PC", ShowInventory), 24, 450, 140, 34);
+        Add(Button("Ripristino d'emergenza", Restore), 178, 450, 166, 34);
+        Add(Button("Profilo di questo PC", ApplyPcProfile), 356, 450, 166, 34);
+        Add(Button("Modalità Esperto", ShowExpert), 534, 450, 140, 34);
         Add(Button("Importa profilo", ImportProfile), 24, 392, 140, 34);
         Add(Button("Esporta profilo", ExportProfile), 175, 392, 140, 34);
         Add(Button("Libreria giochi", ShowGameLibrary), 326, 392, 145, 34);
         Add(Button("Azioni Boost", ShowBoostActions), 482, 392, 192, 34);
-        Add(status, 24, 446, 650, 62);
+        Add(status, 24, 506, 650, 62);
         profile.SelectedIndexChanged += delegate { SavePreferences(); };
         allow.CheckedChanged += delegate { SavePreferences(); };
         gameLabel.Text = "Gioco non configurato";
         status.Text = "Scegli un gioco e avvia un'app secondaria da questa finestra.";
-        if (action.Pending) Recover("Intervento precedente ripristinato.");
+        if (action.Pending || power.Pending) Recover("Intervento precedente ripristinato.");
         timer.Interval = 3000;
         timer.Tick += delegate { Sample(); };
         Shown += delegate { Sample(); timer.Start(); ScanMachine(); };
@@ -700,11 +808,32 @@ internal sealed class Dashboard : Form
         };
     }
 
+    private void ApplyPcProfile(object sender, EventArgs args)
+    {
+        if (!Recover("Stato originale ripristinato.")) return;
+        enabled.Checked = false;
+        allowPower = false;
+        SetPreferences(new GamePreferences(0, false));
+        SavePreferences();
+        status.Text = "Profilo PC: Conservativo. Mantiene le impostazioni Windows. I confronti di Minecraft non hanno mostrato un guadagno ripetibile.";
+    }
+
+    private void ShowExpert(object sender, EventArgs args)
+    {
+        using (var dialog = new Form { Text = "Modalità Esperto — valori del PC", Size = new Size(1080, 610), StartPosition = FormStartPosition.CenterParent })
+        using (var list = ExpertSettings.CreateView())
+        {
+            dialog.Controls.Add(list);
+            dialog.ShowDialog(this);
+        }
+    }
+
     private void ActivateBoost(object sender, EventArgs args)
     {
         if (gamePath == null) { status.Text = "Scegli prima il gioco."; return; }
         if (!Recover("Ripristino precedente verificato.")) return;
         waitingAfterRestore = false;
+        powerTried = false;
         enabled.Checked = true;
         status.Text = "Boost attivo. Si applicano il profilo e le autorizzazioni correnti.";
     }
@@ -905,6 +1034,7 @@ internal sealed class Dashboard : Form
     {
         using (var dialog = new Form { Text = "Azioni Boost", Size = new Size(710, 375), StartPosition = FormStartPosition.CenterParent })
         using (var details = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true })
+        using (var powerOption = new CheckBox { Text = "Prova il piano Prestazioni elevate (15 secondi, opt-in)", Dock = DockStyle.Top, Height = 33 })
         using (var current = new Label { Dock = DockStyle.Bottom, Height = 42, Padding = new Padding(8) })
         using (var update = new System.Windows.Forms.Timer { Interval = 500 })
         using (var actionOption = new CheckBox { Text = "Consenti riduzione temporanea della priorità", Dock = DockStyle.Top, Height = 33 })
@@ -912,6 +1042,16 @@ internal sealed class Dashboard : Form
         {
             actionOption.Checked = allow.Checked;
             actionOption.CheckedChanged += delegate { allow.Checked = actionOption.Checked; };
+            powerOption.Checked = allowPower;
+            powerOption.CheckedChanged += delegate
+            {
+                allowPower = powerOption.Checked;
+                if (!allowPower && power.Pending)
+                {
+                    try { power.Restore(); }
+                    catch (Exception error) { status.Text = "Ripristino energia in attesa: " + error.Message; }
+                }
+            };
             details.Columns.Add("Categoria", 144);
             details.Columns.Add("Azione", 250);
             details.Columns.Add("Stato", 280);
@@ -921,7 +1061,9 @@ internal sealed class Dashboard : Form
             details.Items.Add(new ListViewItem(new[] { "Terze parti", "Servizi e attività in background", "Solo inventario" }));
             details.Items.Add(new ListViewItem(new[] { "Browser", "Pausa / recupero sessione", "Da collaudare" }));
             details.Items.Add(new ListViewItem(new[] { "Shell", "Explorer", "Recupero non verificato" }));
-            details.Items.Add(new ListViewItem(new[] { "GPU / energia", "Calibrazione e profilo energetico", "Solo diagnosi" }));
+            var energy = new ListViewItem(new[] { "Energia", "Prestazioni elevate temporaneo", "Disabilitato" });
+            details.Items.Add(energy);
+            details.Items.Add(new ListViewItem(new[] { "GPU", "Calibrazione", "Solo diagnosi" }));
             details.Items.Add(new ListViewItem(new[] { "Sicurezza", "Defender e firewall", "Protetti" }));
 
             Action updateStatus = delegate
@@ -930,6 +1072,8 @@ internal sealed class Dashboard : Form
                     profile.SelectedIndex == 0 ? "Conservativo: solo anteprima" :
                     action.Pending ? "Priorità ridotta" : "In attesa delle condizioni";
                 live.SubItems[2].Text = state;
+                energy.SubItems[2].Text = power.Pending ? "Piano applicato, ripristino in attesa" :
+                    !allowPower ? "Disabilitato" : powerTried ? "Prova conclusa o piano già attivo" : "Pronto per la prova";
                 if (optional == null || optional.HasExited)
                 {
                     current.Text = "Apri una finestra di prova per vedere la priorità cambiare e tornare al valore originale.";
@@ -965,6 +1109,7 @@ internal sealed class Dashboard : Form
             dialog.Controls.Add(details);
             dialog.Controls.Add(current);
             dialog.Controls.Add(demo);
+            dialog.Controls.Add(powerOption);
             dialog.Controls.Add(actionOption);
             dialog.ShowDialog(this);
         }
@@ -1171,10 +1316,11 @@ internal sealed class Dashboard : Form
 
     private bool Recover(string message)
     {
-        if (!action.Pending) return true;
+        if (!action.Pending && !power.Pending) return true;
         try
         {
-            action.Restore();
+            try { action.Restore(); }
+            finally { power.Restore(); }
             actionTime.Reset();
             status.Text = message;
             if (beforeAction != null)
@@ -1190,6 +1336,14 @@ internal sealed class Dashboard : Form
             return true;
         }
         catch (Exception error) { status.Text = "Ripristino in attesa: " + error.Message; return false; }
+    }
+
+    private void EnsureWatcher()
+    {
+        if (watcher != null && !watcher.HasExited) return;
+        if (watcher != null) watcher.Dispose();
+        watcher = Optimizer.StartWatcher();
+        if (watcher == null || watcher.HasExited) throw new InvalidOperationException("Ripristino automatico non disponibile.");
     }
 
     private void Sample()
@@ -1215,6 +1369,7 @@ internal sealed class Dashboard : Form
                 game = null;
                 if (gameTree != null) { gameTree.Dispose(); gameTree = null; }
                 waitingAfterRestore = false;
+                powerTried = false;
                 busySamples = 0;
                 if (!Recover("Gioco terminato. Priorità originale ripristinata.")) return;
             }
@@ -1231,9 +1386,33 @@ internal sealed class Dashboard : Form
             timer.Interval = game == null ? 3000 : 1000;
             if (gamePath != null) gameLabel.Text = (game == null ? "In attesa di " : "Gioco attivo: ") + Path.GetFileName(gamePath);
 
-            bool canAct = game != null && enabled.Checked && allow.Checked && !waitingAfterRestore &&
-                optional != null && !optional.HasExited;
-            if (!canAct) { Recover("Priorità originale ripristinata."); return; }
+            bool sessionReady = game != null && enabled.Checked && !waitingAfterRestore;
+            if (!sessionReady) { Recover("Stato originale ripristinato."); return; }
+            if (power.Pending)
+            {
+                if (profile.SelectedIndex == 0 || !allowPower || watcher == null || watcher.HasExited) power.Restore();
+                else power.RestoreExpired(DateTime.UtcNow);
+            }
+            if (allowPower && !powerTried && profile.SelectedIndex != 0)
+            {
+                powerTried = true;
+                try
+                {
+                    EnsureWatcher();
+                    power.Apply();
+                    status.Text = power.Pending ? "Piano Prestazioni elevate applicato per 15 secondi." : "Piano già attivo.";
+                }
+                catch (Exception error)
+                {
+                    try { power.Restore(); } catch (Exception) { }
+                    status.Text = "Piano energetico: " + error.Message;
+                }
+            }
+            if (!allow.Checked || optional == null || optional.HasExited)
+            {
+                if (action.Pending) action.Restore();
+                return;
+            }
             if (profile.SelectedIndex == 0)
             {
                 if (!Recover("Priorità ripristinata.")) return;
@@ -1245,12 +1424,7 @@ internal sealed class Dashboard : Form
                 status.Text = "Bilanciato: attende due rilevazioni consecutive con CPU almeno al 70%.";
                 return;
             }
-            if (watcher == null || watcher.HasExited)
-            {
-                if (watcher != null) watcher.Dispose();
-                watcher = Optimizer.StartWatcher();
-                if (watcher == null || watcher.HasExited) throw new InvalidOperationException("Ripristino automatico non disponibile.");
-            }
+            EnsureWatcher();
             if (actionTime.IsRunning && !action.Pending)
             {
                 waitingAfterRestore = true;
