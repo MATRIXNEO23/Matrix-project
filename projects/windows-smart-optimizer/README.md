@@ -147,3 +147,9 @@ Prima della richiesta normale di chiusura viene scritto il journal. Se l'app rim
 Verifica sul PC con una finestra sintetica: chiusura del PID 12488 e riapertura con finestra nel PID 10896, mancata duplicazione di una riapertura manuale e rispetto del rifiuto di chiusura. La RAM disponibile del sistema è passata da 2.988,1 a 3.038,3 MiB nel campione finale. Il flusso della dashboard con gioco di prova è stato collaudato separatamente, compresa la riapertura automatica a fine gioco. Build locale 104.960 byte, SHA-256 `8542FE072CADB22B450580481A15DC9397EB0EE00E245E119476F6041F87105C`.
 
 Il controllo di accesso del gestore servizi ha restituito errore Windows 5 per la registrazione di un servizio di prova. Il ciclo reale dei servizi resta da verificare con privilegi amministrativi. Nessun servizio del PC è stato modificato.
+
+### Collaudo reale servizi su Windows
+
+Con approvazione UAC è stato registrato un servizio sintetico `MatrixOptimizerTest-<GUID>`, ad avvio Manuale e con account LocalService. Il test ha scritto il journal prima dell'arresto e verificato in SCM la sequenza Avviato → Arrestato → Avviato. Il tipo di avvio è rimasto Manuale. Il servizio e la sua cartella in ProgramData sono stati rimossi. Un controllo successivo ha confermato che entrambi erano assenti. Nessun servizio già installato è stato modificato.
+
+Il test è riproducibile con `ServiceFixture.cs` e `Collauda-Servizio.ps1`. È un collaudo della transizione e del ripristino da journal su un servizio senza dipendenze. Restano da validare dipendenze reali, accesso amministrativo a operazioni ristrette, ripristino dopo riavvio e presenza di un beneficio prima di rendere i servizi selezionabili dal booster.
