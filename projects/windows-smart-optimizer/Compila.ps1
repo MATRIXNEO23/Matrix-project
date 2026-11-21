@@ -20,7 +20,16 @@ if ($Test) {
             Get-Content -LiteralPath (Join-Path $folder 'result.txt')
             if ($process.ExitCode -ne 0) { throw "Test $iteration fallito. Tracce: $folder" }
         } finally { $process.Dispose() }
-        Remove-Item -LiteralPath (Join-Path $folder 'result.txt'), (Join-Path $folder 'GameFixture.exe')
+        foreach ($name in @('result.txt', 'GameFixture.exe')) {
+            $path = Join-Path $folder $name
+            for ($attempt = 0; $attempt -lt 6; $attempt++) {
+                try { [IO.File]::Delete($path); break }
+                catch [IO.IOException], [UnauthorizedAccessException] {
+                    if ($attempt -eq 5) { throw }
+                    Start-Sleep -Milliseconds 200
+                }
+            }
+        }
         [IO.Directory]::Delete($folder, $false)
     }
 }
