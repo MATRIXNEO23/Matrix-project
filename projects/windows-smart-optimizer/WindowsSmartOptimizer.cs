@@ -119,7 +119,11 @@ internal static class Optimizer
                 finally
                 {
                     try { new PowerPlanAction(state).Restore(); }
-                    finally { new WindowAction(state).Restore(); }
+                    finally
+                    {
+                        try { new WindowAction(state).Restore(); }
+                        finally { new RelaunchAction(state).Restore(); }
+                    }
                 }
                 return 0;
             }
@@ -760,6 +764,114 @@ internal sealed class WindowAction
     }
 }
 
+internal sealed class RelaunchAction
+{
+    private readonly string journal;
+    public RelaunchAction(string folder) { journal = Path.Combine(folder, "relaunch.pending"); }
+    public bool Pending { get { return File.Exists(journal); } }
+
+    private void Locked(Action operation)
+    {
+        using (var mutex = new Mutex(false, @"Local\Matrix.Optimizer.RelaunchUndo"))
+        {
+            bool taken;
+            try { taken = mutex.WaitOne(3000); }
+            catch (AbandonedMutexException) { taken = true; }
+            if (!taken) throw new IOException("Registro di riapertura occupato.");
+            try { operation(); }
+            finally { mutex.ReleaseMutex(); }
+        }
+    }
+
+    public static bool Eligible(string file, bool demo)
+    {
+        if (String.IsNullOrWhiteSpace(file) || file.Length < 3 || !Char.IsLetter(file[0]) ||
+            file[1] != ':' || (file[2] != '\\' && file[2] != '/') || !File.Exists(file) ||
+            !String.Equals(Path.GetExtension(file), ".exe", StringComparison.OrdinalIgnoreCase)) return false;
+        using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
+            if (new System.Security.Principal.WindowsPrincipal(identity).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+                return false;
+        string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\') + "\\";
+        if (file.StartsWith(windows, StringComparison.OrdinalIgnoreCase)) return false;
+        string name = Path.GetFileNameWithoutExtension(file).ToLowerInvariant();
+        if (PriorityAction.IsProtectedName(name) || name == "msedge" || name == "chrome" ||
+            name == "firefox" || name == "opera" || name == "brave" || name == "vivaldi") return false;
+        bool same = ExecutableIdentity.Matches(file, Application.ExecutablePath);
+        return demo == same;
+    }
+
+    public bool Apply(Process process, bool demo)
+    {
+        bool sent = false;
+        Locked(delegate
+        {
+            if (Pending) throw new InvalidOperationException("Riapertura precedente in attesa.");
+            process.Refresh();
+            if (process.HasExited || process.SessionId == 0 || process.MainWindowHandle == IntPtr.Zero) return;
+            string file = process.MainModule.FileName;
+            if (!Eligible(file, demo)) throw new InvalidOperationException("Questa app non può essere chiusa dal boost.");
+            string record = String.Join("\n", file, demo ? "demo" : "standard",
+                process.Id.ToString(CultureInfo.InvariantCulture),
+                process.StartTime.ToFileTimeUtc().ToString(CultureInfo.InvariantCulture));
+            Directory.CreateDirectory(Path.GetDirectoryName(journal));
+            string pending = journal + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(record);
+                using (var stream = new FileStream(pending, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+                {
+                    stream.Write(bytes, 0, bytes.Length);
+                    stream.Flush(true);
+                }
+                File.Move(pending, journal);
+            }
+            finally { if (File.Exists(pending)) File.Delete(pending); }
+            if (process.HasExited || !process.CloseMainWindow())
+            {
+                File.Delete(journal);
+                return;
+            }
+            sent = true;
+        });
+        return sent;
+    }
+
+    public bool Restore()
+    {
+        bool relaunched = false;
+        Locked(delegate
+        {
+            if (!Pending) return;
+            string[] fields = File.ReadAllLines(journal);
+            int originalPid;
+            long originalStart;
+            if (fields.Length != 4 || (fields[1] != "demo" && fields[1] != "standard") ||
+                !Int32.TryParse(fields[2], out originalPid) || originalPid <= 0 ||
+                !Int64.TryParse(fields[3], out originalStart) || originalStart <= 0 ||
+                !Eligible(fields[0], fields[1] == "demo"))
+                throw new InvalidDataException("Il journal di riapertura non è valido o l'eseguibile non è più disponibile.");
+
+            using (Process existing = Optimizer.FindGame(fields[0]))
+            {
+                if (existing != null)
+                {
+                    File.Delete(journal);
+                    return;
+                }
+            }
+            using (Process launched = Process.Start(new ProcessStartInfo(fields[0], fields[1] == "demo" ? "--demo-worker" : "") {
+                UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(fields[0])
+            }))
+            {
+                if (launched == null) throw new IOException("L'app secondaria non è stata riaperta.");
+                relaunched = true;
+            }
+            File.Delete(journal);
+        });
+        return relaunched;
+    }
+}
+
 internal sealed class Telemetry
 {
     [StructLayout(LayoutKind.Sequential)]
@@ -869,6 +981,7 @@ internal sealed class Dashboard : Form
     private readonly PriorityAction action;
     private readonly PowerPlanAction power;
     private readonly WindowAction windowAction;
+    private readonly RelaunchAction relaunch;
     private readonly IoCounters io = new IoCounters();
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     private readonly Label metrics = new Label(), status = new Label(), gameLabel = new Label();
@@ -882,6 +995,9 @@ internal sealed class Dashboard : Form
     private Telemetry previous;
     private bool waitingAfterRestore;
     private bool allowPower, powerTried, allowWindow, windowTried, priorityTried;
+    private bool optionalDemo, relaunchTried;
+    private ulong? ramBeforeClose;
+    private string relaunchGame;
     private MachineInventory scanned;
     private string scanError;
     private bool loadingPreferences, automaticSession;
@@ -895,6 +1011,7 @@ internal sealed class Dashboard : Form
         this.action = action;
         power = new PowerPlanAction(action.StateFolder);
         windowAction = new WindowAction(action.StateFolder);
+        relaunch = new RelaunchAction(action.StateFolder);
         Text = "Windows Smart Optimizer";
         ClientSize = new Size(700, 632);
         MinimumSize = new Size(710, 672);
@@ -951,7 +1068,7 @@ internal sealed class Dashboard : Form
         allow.CheckedChanged += delegate { SavePreferences(); };
         gameLabel.Text = "Gioco non configurato";
         status.Text = "Scegli un gioco e avvia un'app secondaria da questa finestra.";
-        bool recovering = action.Pending || power.Pending || windowAction.Pending;
+        bool recovering = action.Pending || power.Pending || windowAction.Pending || relaunch.Pending;
         if (recovering) Recover("Intervento precedente ripristinato.");
         try
         {
@@ -1010,6 +1127,7 @@ internal sealed class Dashboard : Form
         powerTried = false;
         windowTried = false;
         priorityTried = false;
+        relaunchTried = false;
         enabled.Checked = true;
         status.Text = "Boost attivo. Si applicano il profilo e le autorizzazioni correnti.";
     }
@@ -1214,6 +1332,7 @@ internal sealed class Dashboard : Form
         using (var details = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true })
         using (var powerOption = new CheckBox { Text = "Prova il piano Prestazioni elevate (15 secondi, opt-in)", Dock = DockStyle.Top, Height = 33 })
         using (var windowOption = new CheckBox { Text = "Minimizza e ripristina la finestra secondaria", Dock = DockStyle.Top, Height = 33 })
+        using (var restart = new CheckBox { Text = "Chiudi e riapri l'app secondaria in questa sessione", Dock = DockStyle.Top, Height = 33 })
         using (var current = new Label { Dock = DockStyle.Bottom, Height = 42, Padding = new Padding(8) })
         using (var update = new System.Windows.Forms.Timer { Interval = 500 })
         using (var actionOption = new CheckBox { Text = "Consenti riduzione temporanea della priorità", Dock = DockStyle.Top, Height = 33 })
@@ -1243,6 +1362,22 @@ internal sealed class Dashboard : Form
                     catch (Exception error) { status.Text = "Ripristino finestra in attesa: " + error.Message; }
                 }
             };
+            restart.Checked = relaunchGame != null && String.Equals(relaunchGame, gamePath, StringComparison.OrdinalIgnoreCase);
+            restart.CheckedChanged += delegate
+            {
+                if (!restart.Checked) { relaunchGame = null; if (relaunch.Pending) Recover("Ripristino richiesto."); return; }
+                try
+                {
+                    if (gamePath == null || optional == null || optional.HasExited ||
+                        !RelaunchAction.Eligible(optional.MainModule.FileName, optionalDemo))
+                        throw new InvalidOperationException("Scegli il gioco e avvia un'app secondaria compatibile, oppure usa la finestra di prova.");
+                    if (MessageBox.Show(dialog, "L'app riceverà una richiesta normale di chiusura. Al ripristino verrà aperta una nuova istanza. Salva prima il lavoro: documenti e finestre interne della vecchia istanza potrebbero non tornare.",
+                        "Autorizza questa app", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                    { restart.Checked = false; return; }
+                    relaunchGame = gamePath;
+                }
+                catch (Exception error) { restart.Checked = false; MessageBox.Show(dialog, error.Message); }
+            };
             details.Columns.Add("Categoria", 144);
             details.Columns.Add("Azione", 250);
             details.Columns.Add("Stato", 280);
@@ -1250,6 +1385,8 @@ internal sealed class Dashboard : Form
             details.Items.Add(live);
             var windowRow = new ListViewItem(new[] { "Finestre", "Minimizza e ripristina", "Disabilitata" });
             details.Items.Add(windowRow);
+            var restartRow = new ListViewItem(new[] { "App secondaria", "Chiudi e riapri dopo il boost", "Disabilitata" });
+            details.Items.Add(restartRow);
             details.Items.Add(new ListViewItem(new[] { "Servizi Windows", "Arresto e riavvio", "Da collaudare" }));
             details.Items.Add(new ListViewItem(new[] { "Terze parti", "Servizi e attività in background", "Solo inventario" }));
             details.Items.Add(new ListViewItem(new[] { "Browser", "Pausa / recupero sessione", "Da collaudare" }));
@@ -1265,6 +1402,9 @@ internal sealed class Dashboard : Form
                     profile.SelectedIndex == 0 ? "Conservativo: solo anteprima" :
                     action.Pending ? "Priorità ridotta" : "In attesa delle condizioni";
                 live.SubItems[2].Text = state;
+                restartRow.SubItems[2].Text = relaunch.Pending ?
+                    (optional != null && optional.HasExited ? "App chiusa; riapertura in attesa" : "Chiusura richiesta; app ancora attiva") :
+                    relaunchGame == null ? "Disabilitata" : "Autorizzata per questa sessione";
                 windowRow.SubItems[2].Text = windowAction.Pending ? "Richiesta inviata; ripristino in attesa" :
                     !allowWindow ? "Disabilitata" : "Pronta con una finestra secondaria";
                 energy.SubItems[2].Text = power.Pending ? "Piano applicato, ripristino in attesa" :
@@ -1296,6 +1436,8 @@ internal sealed class Dashboard : Form
                 try
                 {
                     optional = Process.Start(new ProcessStartInfo(Application.ExecutablePath, "--demo-worker") { UseShellExecute = false });
+                    optionalDemo = true;
+                    relaunchGame = null;
                     status.Text = "Finestra di prova avviata. Con Minecraft attivo, consenti l'intervento e scegli il profilo.";
                     dialog.Close();
                 }
@@ -1304,6 +1446,7 @@ internal sealed class Dashboard : Form
             dialog.Controls.Add(details);
             dialog.Controls.Add(current);
             dialog.Controls.Add(demo);
+            dialog.Controls.Add(restart);
             dialog.Controls.Add(windowOption);
             dialog.Controls.Add(powerOption);
             dialog.Controls.Add(actionOption);
@@ -1392,7 +1535,7 @@ internal sealed class Dashboard : Form
                         String.Equals(path, gamePath, StringComparison.OrdinalIgnoreCase))))
                     {
                         DeactivateBoost(this, EventArgs.Empty);
-                        if (action.Pending || power.Pending || windowAction.Pending) return;
+                        if (action.Pending || power.Pending || windowAction.Pending || relaunch.Pending) return;
                     }
                     next.Save(AutomaticPath);
                     automatic = next;
@@ -1529,6 +1672,8 @@ internal sealed class Dashboard : Form
         {
             if (!Recover("App secondaria pronta.")) return;
             if (optional != null) { optional.Dispose(); optional = null; }
+            optionalDemo = false;
+            relaunchGame = null;
             optional = Process.Start(new ProcessStartInfo(selected) {
                 UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(selected)
             });
@@ -1623,17 +1768,23 @@ internal sealed class Dashboard : Form
 
     private bool Recover(string message)
     {
-        if (!action.Pending && !power.Pending && !windowAction.Pending) return true;
+        if (!action.Pending && !power.Pending && !windowAction.Pending && !relaunch.Pending) return true;
         try
         {
+            bool opened = false;
             try { action.Restore(); }
             finally
             {
                 try { power.Restore(); }
-                finally { windowAction.Restore(); }
+                finally
+                {
+                    try { windowAction.Restore(); }
+                    finally { opened = relaunch.Restore(); }
+                }
             }
             actionTime.Reset();
-            status.Text = message;
+            ramBeforeClose = null;
+            status.Text = opened ? "App secondaria riaperta. " + message : message;
             if (beforeAction != null)
             {
                 var after = Telemetry.Read();
@@ -1685,6 +1836,8 @@ internal sealed class Dashboard : Form
                 powerTried = false;
                 windowTried = false;
                 priorityTried = false;
+                relaunchTried = false;
+                relaunchGame = null;
                 busySamples = 0;
                 if (!Recover("Gioco terminato. Priorità originale ripristinata.")) return;
             }
@@ -1723,9 +1876,29 @@ internal sealed class Dashboard : Form
 
             bool sessionReady = game != null && enabled.Checked && !waitingAfterRestore;
             if (!sessionReady) { Recover("Stato originale ripristinato."); return; }
+            bool requestedRelaunch = relaunchGame != null && String.Equals(gamePath, relaunchGame, StringComparison.OrdinalIgnoreCase) &&
+                profile.SelectedIndex != 0;
+            if (requestedRelaunch && !relaunchTried && optional != null && !optional.HasExited && optional.MainWindowHandle != IntPtr.Zero)
+            {
+                relaunchTried = true;
+                action.Restore();
+                windowAction.Restore();
+                EnsureWatcher();
+                if (relaunch.Apply(optional, optionalDemo))
+                {
+                    ramBeforeClose = now.Available;
+                    status.Text = "Chiusura richiesta. L'app sarà riaperta al ripristino se è uscita.";
+                }
+            }
+            if (relaunch.Pending && ramBeforeClose.HasValue && optional != null && optional.HasExited)
+            {
+                status.Text = String.Format("App chiusa. RAM disponibile di sistema: {0} → {1} MiB. Riapertura al ripristino.",
+                    ramBeforeClose.Value >> 20, now.Available >> 20);
+                ramBeforeClose = null;
+            }
             if (windowAction.Pending && (!allowWindow || profile.SelectedIndex == 0 || watcher == null || watcher.HasExited))
                 windowAction.Restore();
-            if (allowWindow && !windowTried && profile.SelectedIndex != 0 && optional != null && !optional.HasExited &&
+            if (!requestedRelaunch && allowWindow && !windowTried && profile.SelectedIndex != 0 && optional != null && !optional.HasExited &&
                 optional.MainWindowHandle != IntPtr.Zero)
             {
                 windowTried = true;
@@ -1753,6 +1926,7 @@ internal sealed class Dashboard : Form
                     status.Text = "Piano energetico: " + error.Message;
                 }
             }
+            if (requestedRelaunch) return;
             if (!allow.Checked || optional == null || optional.HasExited)
             {
                 if (action.Pending) action.Restore();
