@@ -1563,6 +1563,7 @@ internal sealed class Dashboard : Form
         using (var searchOption = new CheckBox { Text = "Sospendi l’indicizzazione di Windows durante il boost (richiede UAC)", Dock = DockStyle.Top, Height = 33 })
         using (var printing = new CheckBox { Text = "Sospendi la stampa durante il boost (richiede UAC)", Dock = DockStyle.Top, Height = 29 })
         using (var prefetch = new CheckBox { Text = "Sospendi il precaricamento SysMain durante il boost (richiede UAC)", Dock = DockStyle.Top, Height = 29 })
+        using (var iobit = new CheckBox { Text = "Servizi del profilo IObit: BITS, individuazione, Helper IP, compatibilità, stampa, collegamenti e credenziali", Dock = DockStyle.Top, Height = 38 })
         using (var searchPause = new Button { Text = "Pausa Windows Search", Width = 205, Dock = DockStyle.Left })
         using (var searchRestore = new Button { Text = "Ripristina servizio", Width = 172, Dock = DockStyle.Right })
         {
@@ -1571,15 +1572,19 @@ internal sealed class Dashboard : Form
             searchOption.Checked = (boostServices & 1) != 0;
             printing.Checked = (boostServices & 2) != 0;
             prefetch.Checked = (boostServices & 4) != 0;
+            iobit.Checked = (boostServices & (ServiceBoost.ObservedIObitServices & ~2)) != 0;
             EventHandler saveServices = delegate
             {
-                boostServices = (searchOption.Checked ? 1 : 0) | (printing.Checked ? 2 : 0) | (prefetch.Checked ? 4 : 0);
+                boostServices = (searchOption.Checked ? 1 : 0) | (printing.Checked ? 2 : 0) | (prefetch.Checked ? 4 : 0) |
+                    (iobit.Checked ? ServiceBoost.ObservedIObitServices : 0);
                 RefreshPrimaryControls();
             };
             searchOption.CheckedChanged += saveServices;
             printing.CheckedChanged += saveServices;
             prefetch.CheckedChanged += saveServices;
-            searchOption.Enabled = printing.Enabled = prefetch.Enabled = !enabled.Checked;
+            iobit.CheckedChanged += saveServices;
+            searchOption.Enabled = printing.Enabled = prefetch.Enabled = iobit.Enabled = !enabled.Checked;
+            dialog.Controls.Add(iobit);
             dialog.Controls.Add(prefetch);
             dialog.Controls.Add(printing);
             dialog.Controls.Add(searchOption);
