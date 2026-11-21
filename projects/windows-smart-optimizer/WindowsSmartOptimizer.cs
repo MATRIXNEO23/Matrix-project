@@ -89,7 +89,7 @@ internal static class Optimizer
             try
             {
                 if (match == null && process.SessionId == session &&
-                    String.Equals(process.MainModule.FileName, path, StringComparison.OrdinalIgnoreCase)) match = process;
+                    ExecutableIdentity.Matches(process.MainModule.FileName, path)) match = process;
             }
             catch (System.ComponentModel.Win32Exception) { }
             catch (InvalidOperationException) { }
@@ -150,6 +150,40 @@ internal static class Optimizer
                 if (!worker.HasExited) worker.Kill();
             }
         }
+    }
+}
+
+internal static class ExecutableIdentity
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileId
+    {
+        public ulong Volume;
+        public ulong Low;
+        public ulong High;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(
+        string path, uint access, uint sharing, IntPtr security, uint creation, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool GetFileInformationByHandleEx(
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle, int kind, out FileId id, uint size);
+
+    public static bool Matches(string actual, string selected)
+    {
+        if (String.Equals(actual, selected, StringComparison.OrdinalIgnoreCase)) return true;
+        FileId a, b;
+        return TryGetId(actual, out a) && TryGetId(selected, out b) &&
+            a.Volume == b.Volume && a.Low == b.Low && a.High == b.High;
+    }
+
+    private static bool TryGetId(string path, out FileId id)
+    {
+        id = new FileId();
+        using (var handle = CreateFile(path, 0x80, 7, IntPtr.Zero, 3, 0, IntPtr.Zero))
+            return !handle.IsInvalid && GetFileInformationByHandleEx(handle, 18, out id, (uint)Marshal.SizeOf(typeof(FileId)));
     }
 }
 
@@ -402,7 +436,7 @@ internal sealed class Dashboard : Form
         string selected = SelectExe("Scegli l'eseguibile del gioco");
         if (selected == null) return;
         if (optional != null && !optional.HasExited &&
-            String.Equals(optional.MainModule.FileName, selected, StringComparison.OrdinalIgnoreCase))
+            ExecutableIdentity.Matches(optional.MainModule.FileName, selected))
         {
             status.Text = "Il gioco deve essere diverso dall'app secondaria.";
             return;
@@ -420,8 +454,8 @@ internal sealed class Dashboard : Form
         if (selected == null) return;
         string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\') + "\\";
         if (selected.StartsWith(windows, StringComparison.OrdinalIgnoreCase) ||
-            String.Equals(selected, gamePath, StringComparison.OrdinalIgnoreCase) ||
-            String.Equals(selected, Application.ExecutablePath, StringComparison.OrdinalIgnoreCase))
+            (gamePath != null && ExecutableIdentity.Matches(selected, gamePath)) ||
+            ExecutableIdentity.Matches(selected, Application.ExecutablePath))
         {
             status.Text = "Scegli un'app utente distinta dal gioco e dall'ottimizzatore.";
             return;
