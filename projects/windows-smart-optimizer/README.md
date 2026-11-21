@@ -60,3 +60,120 @@ L'utente ha confermato di essere nel mondo. Due ulteriori coppie da otto secondi
 | 2 | 49,90 → 57,86 | 80 → 17 |
 
 Minecraft ha presentato 59,78–59,97 FPS in tutti e quattro i campioni. La variabilità maggiore è stata negli intervalli tra immagini visualizzate. Una coppia è peggiorata e una è migliorata. Questo test non giustifica abilitare automaticamente la riduzione di priorità per Minecraft nelle condizioni osservate.
+
+## Incremento Game Booster reversibile
+
+L'ordine [Game Booster](ORDINE_WORK_GAME_BOOSTER_OTTIMIZZAZIONE_REVERSIBILE.md) trova qui una prima integrazione. La build corrente Windows 10 x64 è di 44.544 byte. SHA-256 `3D655D49D06EC84C31D3BC15916EBC7369D51851D4BC7FEDE502292CA19E154B`. I valori nelle sezioni precedenti descrivono build storiche.
+
+- **Discovery:** `MachineInventory` legge hardware e driver, servizi, processi, browser noti, chiavi Run e attività visibili nella radice dell'Utilità di pianificazione. La scansione singola avviene fuori dal thread UI. La ricerca giochi individua Minecraft for Windows nelle installazioni XboxGames. Il selettore esistente supporta eseguibili manuali e portatili.
+- **Policy e UI:** il gioco individuato viene proposto con profilo Conservativo e boost spento. I profili salvano livello e autorizzazione all'intervento per percorso del gioco. Import ed export includono le sole opzioni e l'import tiene spento il boost. Comandi di attivazione, disattivazione e ripristino d'emergenza sono distinti. Il cambio di gioco passa prima dal ripristino. La scorciatoia resta opzionale.
+- **Transazione:** il journal dura su disco prima della modifica e include ID, PID, ora di avvio, percorso, valore originale, valore applicato e scadenza. Resta leggibile il journal precedente a tre campi. App e watchdog serializzano gli accessi. La UI attende il segnale di disponibilità del watchdog prima di agire. Il watchdog controlla la scadenza anche con la dashboard ancora attiva. Il rollback conserva un valore di priorità diverso da quello scritto dal booster.
+- **Distribuzione:** compilazione e tre prove ripetibili da `Compila.ps1 -Test`. Per il benchmark storico compilare anche `MachineInventory.cs` e aggiungere la referenza a `System.Management.dll`.
+
+| Funzione storica | Esito e prerequisito | Default | Impatto, rischio e ripristino |
+| --- | --- | --- | --- |
+| Processi / priorità | Verificata su Windows 10 con processi di prova. Solo app secondaria avviata dal booster, stessa sessione utente, priorità normale. | Conservativo; boost spento | Riduce la CPU disponibile all'app secondaria, fino alla sua temporanea quasi inattività sotto contesa. Ripristino automatico e manuale; benefici in gioco non ripetuti. |
+| Servizi Windows e terze parti, startup, task | Inventario parziale in lettura. Dipendenze, arresto e ripristino specifici da verificare. | Spento | Nessun cambiamento. |
+| Browser e Explorer | Diagnosi. Le sessioni sono da preservare. | Spento | Sospensione e recupero delle finestre non verificati. |
+| Piano energetico, affinità, worker threads, cache, Prefetch, rete, GUI, Fix bad tweak | Supporto ed effetto storico da verificare voce per voce. | Spento | Nessuna scrittura. La pulizia indiscriminata di cache e appunti resta esclusa. |
+| GPU | Diagnosi Radeon HD 6450 con driver 15.301.1901.0. API di regolazione, sensori e undo non verificati. | Sola diagnosi | Nessuna calibrazione, modifica delle frequenze o stress test. |
+| Defender, firewall, servizi di sicurezza | Esclusi. | Esclusi | Nessuna modifica alle protezioni. |
+
+### Verifiche dell'incremento
+
+Windows 10 19045, Intel Core i3-2100, Radeon HD 6450. Inventario reale: 1 gioco rilevato, 175 processi, 270 servizi, 8 voci Run. Test riusciti per due profili indipendenti, aggiornamento e rilettura, ripristino dopo la scadenza a 15,3 secondi con proprietario attivo, modifica concorrente preservata, uscita/crash sintetici e journal. La build finale ha superato tre test e ha aperto una dashboard reattiva a boost spento. Campione breve dopo la scansione: 12,41 MiB di RAM privata residente e 0,73% di un core. Non è una misura a regime su un PC con 4 GB.
+
+Restano da completare la libreria multigioco e Steam, il riconoscimento delle dipendenze e degli avvii figli, l'inventario esaustivo, i candidati preselezionati voce per voce, gli adapter aggiuntivi con undo verificato, i test di spegnimento improvviso e di privilegi, il catalogo storico completo e nuovi benchmark ripetuti. L'auto-tuning è bloccato sul PC di prova finché non sono verificati hardware, API e ripristino.
+
+### Estensione libreria, dipendenze e diagnosi
+
+Build Windows 10 x64: 58.368 byte, SHA-256 `F637E4BC7DC0D58B609589AF26FF9FF18FE9D9C7264C3FAC75668F2D51EB3942`.
+
+- **Libreria e albero:** rileva Minecraft e legge i manifest Steam sia nella libreria principale sia nelle librerie locali registrate. Per una voce Steam, l'utente sceglie l'eseguibile nella cartella rilevata. Il monitor riconosce l'avvio del file selezionato indipendentemente dal launcher e segue i discendenti osservati che appartengono alla stessa sessione e alla cartella dell'eseguibile. Quando il processo principale termina, la sessione resta attiva finché uno di questi figli è ancora in esecuzione. Dipendenze esterne, avvii attraverso broker e riconoscimento automatico dell'eseguibile Steam restano aperti.
+- **Inventario:** attività pianificate nelle sottocartelle, fino a 64 cartelle o 512 voci. Nel test reale: 1 gioco, 270 servizi, 94 attività. Per Steam il test è sintetico. La voce Steam nel registro locale non ha fornito manifest utilizzabili.
+- **GPU:** la scheda Radeon HD 6450 e il driver 15.301.1901.0 espongono AMD ADL Overdrive 5. Il driver segnala la regolazione disabilitata. La build ha letto 650 MHz core, 820 MHz memoria e 50,5 °C nel campione. Il valore di utilizzo era 29%. L'integrazione usa solo letture dalla DLL di sistema. Non è stata provata una scrittura reversibile e la calibrazione resta disabilitata.
+- **Edge:** prova headless con profilo separato e pagina locale sintetica. Il primo campione è stato scartato perché il renderer non è rimasto stabile. Nel campione valido abbassare la priorità della radice non ha cambiato la priorità osservata del renderer, rimasta a 8. Il tempo CPU del renderer è passato da 609,4 a 625,0 ms fra le finestre misurate. La radice è tornata a priorità Normale. Il dato non evidenzia un beneficio e non autorizza un adapter per Edge. Le finestre Edge personali sono rimaste fuori dal test.
+- **Test:** tre esecuzioni di `Compila.ps1 -Test` sulla build finale. Verificate anche la lettura di un manifest Steam sintetico, l'esclusione di un percorso di installazione non valido e la gestione del processo figlio dopo l'uscita della radice.
+
+### Condizioni per completare l'ordine
+
+Mancano la preselezione delle singole voci basata su benefici ripetibili, il catalogo storico completo, le prove reali su Steam e 4 GB, la verifica del riavvio a freddo e la calibrazione GPU. Servizi, piano energetico, affinità, browser e shell restano senza adapter attivo finché ciascuna modifica non ha un ripristino verificato e una misura di beneficio. Per la GPU occorrono driver e hardware su cui validare la lettura, il limite termico e il recupero dopo una modifica, poi consenso specifico alla calibrazione. Per servizi e shell occorre un ambiente sacrificabile che consenta anche il test di errore e interruzione. Le prove Minecraft già registrate non hanno mostrato un miglioramento ripetibile.
+
+### Ripristino in condizioni di errore
+
+Build di 59.904 byte, SHA-256 `B5A3442C63846A871766AB3EED7717FA8A75ACB6DD9DBB42E7029C2174683C88`. In tre esecuzioni su Windows 10 Home 22H2, i nuovi test mantengono il journal corrotto per diagnosi, impediscono di cambiare priorità se il journal non può essere scritto, ignorano registri riferiti a un PID con ora di avvio o percorso diversi e ripristinano ancora un journal valido del formato precedente. I test usano soltanto processi creati dalla fixture.
+
+Sul PC, virtualizzazione firmware, EPT e VM Monitor Mode risultano disponibili. Windows Sandbox non è supportato nell'edizione Home. Non è stato trovato un hypervisor già predisposto. Restano senza collaudo in una vera VM i test su servizi, shell e riavvio a freddo. La RAM di una VM configurata a 4 GB consente test funzionali, ma non rappresenta da sola la fluidità su hardware fisico con 4 GB.
+
+### Selettore applicazioni e confronto con Game Booster 3
+
+- **Selezione:** Scegli gioco e Avvia app secondaria aprono un elenco cercabile di giochi, programmi registrati e app nella cartella virtuale di Windows. Consente un .exe manuale se Windows non fornisce un percorso verificabile. Sul PC sono state rilevate 194 voci installate e 1 gioco. L'elenco si aggiorna quando la scansione asincrona termina.
+- **Azioni:** la finestra Azioni Boost mostra disponibilità per categoria, stato dell'intervento e priorità corrente. La finestra di prova permette di vedere la transizione di priorità e il ritorno al valore originale senza chiudere app. Una sola azione è operativa. L'arresto e la riapertura generici delle app non sono implementati.
+- **REA:** analisi statica di `GameBooster.exe`, `Boost.exe`, `gbtray.exe`, `taskMgr.dll` e `PowerConfig.dll`. Le risorse mostrano opzioni per processi, servizi Windows e di terzi, Explorer, memoria, appunti, piano energetico e ripristino a fine gioco. In `Boost.exe` e `GameBooster.exe` risultano importazioni per controllo e avvio servizi, dipendenze, terminazione processi e working set. `PowerConfig.dll` contiene nomi delle API di lettura e cambio piano. Le importazioni e i riferimenti statici non stabiliscono le condizioni esatte del ripristino o la conservazione delle sessioni. IObit non è stato avviato durante l'analisi.
+- **Build locale:** 71.680 byte, SHA-256 `D9E86E521CD7F64E80EFD5BE7585744684B0E86EE64BAC66D3665BDB2A996525`. Tre test integrati passati. Dashboard reattiva, 15,07 MiB di RAM privata residente nel campione dopo la scansione con boost spento. Non è stato misurato il consumo di IObit in condizioni comparabili.
+
+### Profilo del PC e modalità Esperto
+
+La dashboard espone un comando Boost principale e il pulsante Profilo di questo PC. Il profilo consigliato per la macchina collaudata (Core i3-2100 e Radeon HD 6450) è Conservativo. I confronti Minecraft non hanno mostrato un vantaggio ripetibile. Il profilo conserva il piano Bilanciato osservato e i valori Windows correnti; nessun tweak al registro viene applicato. La modalità Esperto legge le chiavi effettive, pubblica valore corrente e proposta e indica quando un valore manca o un tweak storico non è stato mappato. Nella prova il valore corrente dello scheduler era 26.
+
+L'opzione temporanea Prestazioni elevate è separata dal profilo consigliato e attivabile esplicitamente in Azioni Boost. Richiede un gioco rilevato, un profilo operativo, scrittura anticipata del journal e watchdog pronto. Registra piano originale, piano applicato, identificatore e scadenza, poi verifica il cambio tramite PowrProf. La disattivazione, la chiusura del gioco, la scadenza e il recupero all'avvio attivano il percorso di ripristino. Se il piano corrente è diverso da quello applicato, il rollback lascia la scelta successiva. Le due azioni di ripristino, priorità ed energia, vengono tentate separatamente.
+
+Test reale del singolo adapter: Bilanciato → Prestazioni elevate → Bilanciato, con nuova istanza del registro per il ripristino. Verifica indipendente con `powercfg /getactivescheme` a fine test. Il test concorrente simulato ha preservato Bilanciato. Un eventuale beneficio FPS del cambio piano, la sua scadenza di 15 secondi sotto arresto del processo reale e il riavvio a freddo restano da misurare per questo adapter. La build locale di 82.944 byte è stata aperta a boost spento dopo tre prove integrate riuscite. SHA-256 `7BAC3965B6B536F2F5B659F427094DB2C38C8AC02B03858FC32E8CAF7F87765A`.
+
+### Finestre durante il boost
+
+La spunta Minimizza e ripristina in Azioni Boost riguarda la finestra principale dell'app secondaria avviata dalla dashboard. Richiede il gioco attivo, un profilo operativo e il watchdog pronto. Prima dell'intervento registra l'identità del processo e della finestra, lo stato e la geometria. Il ripristino usa la finestra originale e lascia com'è una finestra che l'utente ha già riportato a schermo. La disattivazione e la fine della sessione ripristinano priorità, piano e finestra; la scadenza della sola priorità lascia proseguire le altre azioni. Una finestra chiusa dall'utente non viene ricreata.
+
+Su una finestra di prova Windows sono stati osservati minimizzazione, stesso processo, ritorno alla geometria originale e rispetto del ripristino manuale. Tre prove integrate passate. Il valore NTFS 0x80000002 appare come Sistema · disabilitato, come confermato da fsutil. Build aperta a boost spento, 89.600 byte, SHA-256 `BE7DCF916D0DC9CEE9D99033D11C70490F76CBD2B39E3E7F6674E934455CA232`.
+
+Quest'azione preserva la sessione di una finestra. Mancano ancora gli adapter per disabilitare processi o servizi con ripristino verificato, chiudere e riaprire app, e applicare automaticamente impostazioni Windows calibrate tramite benchmark. Il profilo consigliato conserva i valori correnti finché non emerge un vantaggio ripetibile.
+
+### Avvio automatico per programmi spuntati
+
+Avvio automatico mostra un elenco di eseguibili con spunte. La lista include i giochi e le app per cui è disponibile un eseguibile selezionabile; si può aggiungere un .exe locale dalla scelta manuale. Il comando Salva conserva le spunte e l'interruttore generale per l'utente corrente. L'opzione è spenta per impostazione predefinita; funziona mentre la dashboard è aperta, senza avviare programmi o registrare un avvio all'accesso a Windows.
+
+Quando viene rilevato un eseguibile spuntato, la dashboard carica il profilo del gioco e abilita il boost. Il profilo Conservativo fa solo anteprima. Il rilevamento segue una sessione per volta e attende l'uscita delle dipendenze già riconosciute. Il boost si disattiva e ripristina le azioni quando la sessione finisce. La disattivazione manuale resta valida finché il gioco resta aperto. Se viene riconosciuto un ripristino pendente dopo un arresto, l'avvio automatico resta sospeso per l'istanza corrente. I profili v2 salvano anche le opzioni energia e finestre; il formato v1 resta leggibile e mantiene queste opzioni disattivate.
+
+Verifica con fixture sul PC: programma non spuntato ignorato; programma spuntato riconosciuto con il suo profilo; alla sua uscita, boost spento e priorità della fixture riportata a Normale. Tre test integrati riusciti; dashboard finale aperta, build 96.768 byte, SHA-256 `3A54B7C06C045A8BCA9684C7E683927A2AD57AB42F0FFE25D515DE1FE46E3FDC`.
+
+La finestra Avvio automatico usa ora una lista con caselle sempre visibili accanto al nome e si popola anche se aperta prima che finisca la scansione. Il test UI ha aperto la finestra prima della scansione, selezionato Minecraft e verificato il salvataggio in un profilo temporaneo, senza cambiare le spunte del profilo reale. La build aggiornata è stata riaperta sul PC a funzioni automatiche ancora da configurare. SHA-256 `4D317187732B99ED31DE5AA7F083A4195C946FD1B7CA60AC07545EE63D599985`.
+
+### Chiusura normale e riapertura dell'app secondaria
+
+In Azioni Boost, Chiudi e riapri l'app secondaria in questa sessione autorizza la sola app lanciata dalla dashboard per il gioco selezionato, con conferma che chiede di salvare il lavoro. La spunta è disattivata per impostazione predefinita, vale per la sessione e richiede un profilo operativo. Browser principali, componenti Windows e protezioni sono esclusi. La riapertura è una nuova istanza dello stesso eseguibile, senza ricostruire documenti o finestre interne. L'intervento prevale su minimizzazione e riduzione di priorità per la medesima app.
+
+Prima della richiesta normale di chiusura viene scritto il journal. Se l'app rimane aperta, per esempio perché rifiuta la chiusura, il ripristino la lascia aperta. Se esiste già un'istanza corrispondente nella sessione, non ne lancia un'altra. Alla disattivazione o alla fine del gioco, il booster rilegge il journal e riapre l'app se è uscita. Quando osserva l'uscita, mostra la RAM disponibile di sistema prima/dopo. Tale variazione comprende anche gli altri processi.
+
+Verifica sul PC con una finestra sintetica: chiusura del PID 12488 e riapertura con finestra nel PID 10896, mancata duplicazione di una riapertura manuale e rispetto del rifiuto di chiusura. La RAM disponibile del sistema è passata da 2.988,1 a 3.038,3 MiB nel campione finale. Il flusso della dashboard con gioco di prova è stato collaudato separatamente, compresa la riapertura automatica a fine gioco. Build locale 104.960 byte, SHA-256 `8542FE072CADB22B450580481A15DC9397EB0EE00E245E119476F6041F87105C`.
+
+Il controllo di accesso del gestore servizi ha restituito errore Windows 5 per la registrazione di un servizio di prova. Il ciclo reale dei servizi resta da verificare con privilegi amministrativi. Nessun servizio del PC è stato modificato.
+
+### Collaudo reale servizi su Windows
+
+Con approvazione UAC è stato registrato un servizio sintetico `MatrixOptimizerTest-<GUID>`, ad avvio Manuale e con account LocalService. Il test ha scritto il journal prima dell'arresto e verificato in SCM la sequenza Avviato → Arrestato → Avviato. Il tipo di avvio è rimasto Manuale. Il servizio e la sua cartella in ProgramData sono stati rimossi. Un controllo successivo ha confermato che entrambi erano assenti. Nessun servizio già installato è stato modificato.
+
+Il test è riproducibile con `ServiceFixture.cs` e `Collauda-Servizio.ps1`. È un collaudo della transizione e del ripristino da journal su un servizio senza dipendenze. Restano da validare dipendenze reali, accesso amministrativo a operazioni ristrette, ripristino dopo riavvio e presenza di un beneficio prima di rendere i servizi selezionabili dal booster.
+
+### Controllo del servizio dalla dashboard
+
+Azioni Boost include Pausa Windows Search e Ripristina servizio. La pausa è manuale e richiede un gioco attivo, un profilo operativo e conferma. Solo il processo helper richiede UAC. L'helper verifica PID, avvio e sessione del gioco e della dashboard, controlla che Windows Search sia avviato, arrestabile, con avvio automatico e senza dipendenti attivi. Prima dello stop registra lo stato. Il comando SCM arresta soltanto il servizio selezionato. Lo SCM può rifiutare la richiesta se nel frattempo parte un dipendente. L'helper riavvia il servizio quando si termina il boost o si chiude il processo del gioco o della dashboard. Il tipo di avvio non viene scritto. Se manca l'helper e resta un journal, Ripristina servizio richiede UAC e tenta il recupero. Il ripristino dopo un arresto del solo helper o al riavvio del PC non è stato verificato.
+
+Il codice `ServiceBoost` usato dalla dashboard è stato compilato anche con `ServiceAdapterProbe.cs` e provato live su un servizio temporaneo: arresto SCM, scrittura anticipata, rilettura del journal e ritorno a Running con tipo di avvio Manuale invariato. Il servizio temporaneo è stato rimosso. Windows Search è rimasto in esecuzione per tutto il collaudo. La pausa effettiva di Windows Search e i benefici in gioco restano da verificare. Nessun altro servizio è selezionabile.
+
+Build locale di 112.640 byte, SHA-256 `5ED3409AA9CD272759ADADEB35A08F9E94047431082A91DCA790AE9DD8561E9A` e tre test integrati riusciti.
+
+### Schermata Boost semplificata e osservazioni IObit
+
+La finestra principale separa gioco/avvio automatico, profilo/azioni e il comando principale che alterna Attiva Boost e Disattiva e ripristina. Lo stato distingue boost spento, in attesa di gioco, anteprima e boost attivo. I controlli avanzati, le diagnosi, i profili e il ripristino d'emergenza sono in Strumenti. La scelta dell'app secondaria è in Configura azioni.
+
+Dall'installazione IObit sono stati verificati i file `GameBooster.ini`, `Process.ini` e `Service.ini`. Quest'ultimo distingue gruppi per Windows 2000, XP, Vista, 7, 8 e servizi di terze parti. Il log esistente di ripristino registra servizi riavviati, lettura di processi da un file temporaneo, rilancio di Explorer per percorso, ripristino appunti, piano energetico e aggiornamenti. Il log non prova la ricostruzione dello stato delle finestre. IObit era già in esecuzione. Il controllo della sua finestra è scaduto e il boost IObit non è stato applicato durante il confronto.
+
+Build di 115.200 byte con tre test integrati superati, prova UI dei cinque comandi, tasto Attiva/Disattiva e apertura Strumenti. Dashboard aggiornata e aperta sul PC. SHA-256 `5EEC1E0C11123973B90B8FFF2232BBCDB9CEBAF935DD15FAEC54A27929DEDEDA`.
+
+### Flusso Boost attuale
+
+In Configura azioni, App da chiudere e riaprire mostra le app aperte compatibili con caselle di selezione. La scelta vale per il gioco e per la sessione dell'ottimizzatore. Un profilo operativo invia richieste di chiusura normale, registra ogni intervento separatamente e tenta la riapertura al ripristino o all'uscita del gioco. Il riepilogo mostra le uscite effettive e la variazione della RAM disponibile di sistema. Edge e Chrome con una sola finestra usano l'opzione di ripristino dell'ultima sessione alla riapertura. Questa opzione è stata verificata con browser simulati.
+
+Le spunte per Windows Search, Spooler e SysMain usano un unico processo con autorizzazione amministrativa. Si possono sospendere i servizi avviati, arrestabili e privi di dipendenti attivi. Ogni servizio ha il proprio registro di ripristino. Il tipo di avvio resta invariato. Ctrl+Alt+F10, se abilitato, usa lo stesso ciclo del pulsante principale.
+
+Il collaudo amministrativo sul PC ha usato gli adapter della build corrente con i tre servizi reali. SCM ha confermato l'arresto di tutti e tre e il ritorno allo stato Running. Il controllo successivo ha confermato il tipo di avvio Automatico per tutti e tre. Questa prova verifica gli adapter dei servizi separatamente dal flusso della dashboard con Minecraft.
