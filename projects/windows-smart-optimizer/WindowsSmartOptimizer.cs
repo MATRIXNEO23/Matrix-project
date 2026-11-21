@@ -18,6 +18,8 @@ internal static class Optimizer
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length > 0 && (args[0] == "--search-boost" || args[0] == "--search-recover"))
+            return ServiceBoost.RunWorker(args, StateFolder);
         if (args.Length > 0 && args[0] == "--test-worker") { Thread.Sleep(60000); return 0; }
         if (args.Length == 1 && args[0] == "--demo-worker") { DemoWindow(); return 0; }
         if (args.Length == 2 && args[0] == "--test-child-owner")
@@ -989,7 +991,8 @@ internal sealed class Dashboard : Form
     private bool shortcutRegistered;
     private readonly ComboBox profile = new ComboBox();
     private readonly ResourceTrend trend = new ResourceTrend();
-    private Process optional, game, watcher;
+    private Process optional, game, watcher, serviceWorker;
+    private EventWaitHandle serviceStop;
     private GameTree gameTree;
     private string gamePath;
     private Telemetry previous;
@@ -1040,7 +1043,10 @@ internal sealed class Dashboard : Form
         shortcut.Text = "Usa Ctrl+Alt+F10 per attivare o disattivare il boost";
         Add(shortcut, 24, 300, 650, 28);
         shortcut.CheckedChanged += delegate { UpdateShortcut(); };
-        enabled.CheckedChanged += delegate { if (!enabled.Checked) Recover("Boost spento. Priorità originale ripristinata."); };
+        enabled.CheckedChanged += delegate
+        {
+            if (!enabled.Checked) { StopManagedService(); Recover("Boost spento. Stato originale ripristinato."); }
+        };
         allow.CheckedChanged += delegate
         {
             if (!allow.Checked && action.Pending)
@@ -1086,6 +1092,7 @@ internal sealed class Dashboard : Form
         FormClosing += delegate {
             timer.Stop();
             ReleaseShortcut();
+            StopManagedService();
             Recover("Priorità ripristinata.");
         };
         FormClosed += delegate {
@@ -1134,6 +1141,7 @@ internal sealed class Dashboard : Form
 
     private void DeactivateBoost(object sender, EventArgs args)
     {
+        StopManagedService();
         waitingAfterRestore = true;
         enabled.Checked = false;
         Recover("Boost spento. Priorità ripristinata.");
@@ -1326,9 +1334,35 @@ internal sealed class Dashboard : Form
         }
     }
 
+    private void StopManagedService()
+    {
+        if (serviceStop != null) serviceStop.Set();
+    }
+
+    private void StartSearchBoost()
+    {
+        if (game == null || game.HasExited || !enabled.Checked || profile.SelectedIndex == 0 || waitingAfterRestore)
+        {
+            MessageBox.Show(this, "Avvia il gioco e attiva il boost con un profilo operativo.", "Windows Search");
+            return;
+        }
+        if (serviceWorker != null && !serviceWorker.HasExited) return;
+        if (MessageBox.Show(this, "L'indicizzazione di Windows Search sarà sospesa. Le ricerche possono rallentare. Il servizio tornerà attivo al ripristino o all'uscita dal gioco.",
+            "Intervento su Windows Search", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        try
+        {
+            if (serviceWorker != null) { serviceWorker.Dispose(); serviceWorker = null; }
+            if (serviceStop != null) serviceStop.Dispose();
+            string token = Guid.NewGuid().ToString("N");
+            serviceStop = ServiceBoost.CreateStopSignal(token);
+            using (var owner = Process.GetCurrentProcess()) serviceWorker = ServiceBoost.RunElevated(owner, game, token);
+        }
+        catch (Exception error) { status.Text = "Windows Search: " + error.Message; }
+    }
+
     private void ShowBoostActions(object sender, EventArgs args)
     {
-        using (var dialog = new Form { Text = "Azioni Boost", Size = new Size(710, 375), StartPosition = FormStartPosition.CenterParent })
+        using (var dialog = new Form { Text = "Azioni Boost", Size = new Size(780, 490), StartPosition = FormStartPosition.CenterParent })
         using (var details = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true })
         using (var powerOption = new CheckBox { Text = "Prova il piano Prestazioni elevate (15 secondi, opt-in)", Dock = DockStyle.Top, Height = 33 })
         using (var windowOption = new CheckBox { Text = "Minimizza e ripristina la finestra secondaria", Dock = DockStyle.Top, Height = 33 })
@@ -1336,7 +1370,10 @@ internal sealed class Dashboard : Form
         using (var current = new Label { Dock = DockStyle.Bottom, Height = 42, Padding = new Padding(8) })
         using (var update = new System.Windows.Forms.Timer { Interval = 500 })
         using (var actionOption = new CheckBox { Text = "Consenti riduzione temporanea della priorità", Dock = DockStyle.Top, Height = 33 })
-        using (var demo = new Button { Text = "Apri finestra di prova", Dock = DockStyle.Bottom, Height = 40 })
+        using (var demo = new Button { Text = "Apri finestra di prova", Dock = DockStyle.Bottom, Height = 35 })
+        using (var services = new Panel { Dock = DockStyle.Bottom, Height = 37 })
+        using (var searchPause = new Button { Text = "Pausa Windows Search", Width = 205, Dock = DockStyle.Left })
+        using (var searchRestore = new Button { Text = "Ripristina servizio", Width = 172, Dock = DockStyle.Right })
         {
             actionOption.Checked = allow.Checked;
             actionOption.CheckedChanged += delegate { allow.Checked = actionOption.Checked; };
@@ -1387,7 +1424,24 @@ internal sealed class Dashboard : Form
             details.Items.Add(windowRow);
             var restartRow = new ListViewItem(new[] { "App secondaria", "Chiudi e riapri dopo il boost", "Disabilitata" });
             details.Items.Add(restartRow);
-            details.Items.Add(new ListViewItem(new[] { "Servizi Windows", "Arresto e riavvio", "Da collaudare" }));
+            var searchRow = new ListViewItem(new[] { "Servizi Windows", "Pausa indicizzazione Windows Search", "Facoltativa" });
+            details.Items.Add(searchRow);
+            services.Controls.Add(searchPause);
+            services.Controls.Add(searchRestore);
+            searchPause.Click += delegate { StartSearchBoost(); };
+            searchRestore.Click += delegate
+            {
+                if (serviceWorker != null && !serviceWorker.HasExited) { StopManagedService(); return; }
+                if (!File.Exists(Path.Combine(action.StateFolder, "search.pending"))) return;
+                try
+                {
+                    if (serviceWorker != null) serviceWorker.Dispose();
+                    serviceWorker = Process.Start(new ProcessStartInfo(Application.ExecutablePath, "--search-recover") {
+                        UseShellExecute = true, Verb = "runas"
+                    });
+                }
+                catch (Exception error) { status.Text = "Ripristino servizio: " + error.Message; }
+            };
             details.Items.Add(new ListViewItem(new[] { "Terze parti", "Servizi e attività in background", "Solo inventario" }));
             details.Items.Add(new ListViewItem(new[] { "Browser", "Pausa / recupero sessione", "Da collaudare" }));
             details.Items.Add(new ListViewItem(new[] { "Shell", "Explorer", "Recupero non verificato" }));
@@ -1402,6 +1456,23 @@ internal sealed class Dashboard : Form
                     profile.SelectedIndex == 0 ? "Conservativo: solo anteprima" :
                     action.Pending ? "Priorità ridotta" : "In attesa delle condizioni";
                 live.SubItems[2].Text = state;
+                bool workerActive = serviceWorker != null && !serviceWorker.HasExited;
+                bool pendingSearch = File.Exists(Path.Combine(action.StateFolder, "search.pending"));
+                searchRow.SubItems[2].Text = pendingSearch ? (workerActive ? "Intervento o ripristino in corso" : "Ripristino richiesto") :
+                    workerActive ? "Verifica in corso" : "Facoltativa";
+                if (pendingSearch && workerActive)
+                {
+                    try
+                    {
+                        using (var controller = new System.ServiceProcess.ServiceController(ServiceBoost.Search))
+                            if (controller.Status == System.ServiceProcess.ServiceControllerStatus.Stopped)
+                                searchRow.SubItems[2].Text = "Arrestato · ripristino disponibile";
+                    }
+                    catch (InvalidOperationException) { }
+                    catch (System.ComponentModel.Win32Exception) { }
+                }
+                searchPause.Enabled = !workerActive && !pendingSearch;
+                searchRestore.Enabled = workerActive || pendingSearch;
                 restartRow.SubItems[2].Text = relaunch.Pending ?
                     (optional != null && optional.HasExited ? "App chiusa; riapertura in attesa" : "Chiusura richiesta; app ancora attiva") :
                     relaunchGame == null ? "Disabilitata" : "Autorizzata per questa sessione";
@@ -1445,6 +1516,7 @@ internal sealed class Dashboard : Form
             };
             dialog.Controls.Add(details);
             dialog.Controls.Add(current);
+            dialog.Controls.Add(services);
             dialog.Controls.Add(demo);
             dialog.Controls.Add(restart);
             dialog.Controls.Add(windowOption);
@@ -1644,6 +1716,7 @@ internal sealed class Dashboard : Form
             status.Text = "Il gioco deve essere diverso dall'app secondaria.";
             return;
         }
+        StopManagedService();
         if (!Recover("Gioco configurato.")) return;
         if (game != null) { game.Dispose(); game = null; }
         if (gameTree != null) { gameTree.Dispose(); gameTree = null; }
@@ -1762,8 +1835,9 @@ internal sealed class Dashboard : Form
 
     private void Restore(object sender, EventArgs args)
     {
+        StopManagedService();
         waitingAfterRestore = true;
-        Recover("Priorità ripristinata. Pausa fino alla prossima sessione di gioco.");
+        Recover("Stato originale ripristinato. Pausa fino alla prossima sessione di gioco.");
     }
 
     private bool Recover(string message)
@@ -1827,6 +1901,7 @@ internal sealed class Dashboard : Form
 
             if (game != null && !(gameTree == null ? !game.HasExited : gameTree.Update(game)))
             {
+                StopManagedService();
                 if (automaticSession) enabled.Checked = false;
                 automaticSession = false;
                 game.Dispose();
@@ -1875,6 +1950,7 @@ internal sealed class Dashboard : Form
                 Path.GetFileName(gamePath);
 
             bool sessionReady = game != null && enabled.Checked && !waitingAfterRestore;
+            if (!sessionReady || profile.SelectedIndex == 0) StopManagedService();
             if (!sessionReady) { Recover("Stato originale ripristinato."); return; }
             bool requestedRelaunch = relaunchGame != null && String.Equals(gamePath, relaunchGame, StringComparison.OrdinalIgnoreCase) &&
                 profile.SelectedIndex != 0;
