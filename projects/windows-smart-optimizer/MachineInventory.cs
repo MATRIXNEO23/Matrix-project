@@ -12,6 +12,7 @@ internal sealed class MachineInventory
     public readonly List<string> Hardware = new List<string>();
     public readonly List<string> Gpu = new List<string>();
     public readonly List<GameEntry> Games = new List<GameEntry>();
+    public readonly List<GameEntry> Installed = new List<GameEntry>();
     public readonly List<string> Startup = new List<string>();
     public readonly List<string> Tasks = new List<string>();
     public readonly List<string> Services = new List<string>();
@@ -27,6 +28,7 @@ internal sealed class MachineInventory
         AmdDiagnostics.Read(result.Gpu);
         ReadWmi(result.Hardware, "Win32_DiskDrive", "Model", "MediaType");
         result.Games.AddRange(FindGames());
+        result.Installed.AddRange(FindInstalledApps());
 
         ReadRegistry(result.Startup, Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\Run");
         ReadRegistry(result.Startup, Registry.LocalMachine, @"Software\Microsoft\Windows\CurrentVersion\Run");
@@ -262,11 +264,106 @@ internal sealed class MachineInventory
         return values;
     }
 
+    private static List<GameEntry> FindInstalledApps()
+    {
+        var apps = new Dictionary<string, GameEntry>(StringComparer.CurrentCultureIgnoreCase);
+        foreach (var hive in new[] { RegistryHive.LocalMachine, RegistryHive.CurrentUser })
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            try
+            {
+                using (var root = RegistryKey.OpenBaseKey(hive, view))
+                using (var uninstall = root.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"))
+                {
+                    if (uninstall == null) continue;
+                    foreach (string key in uninstall.GetSubKeyNames())
+                    {
+                        using (var item = uninstall.OpenSubKey(key))
+                        {
+                            if (item == null || Object.Equals(item.GetValue("SystemComponent"), 1) ||
+                                item.GetValue("ParentKeyName") != null) continue;
+                            string name = item.GetValue("DisplayName") as string;
+                            if (String.IsNullOrWhiteSpace(name)) continue;
+                            string folder = ValidFolder(item.GetValue("InstallLocation") as string);
+                            string exe = IconExecutable(item.GetValue("DisplayIcon") as string);
+                            AddApp(apps, name, folder, exe);
+                        }
+                    }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (System.Security.SecurityException) { }
+        }
+
+        object shell = null, appsFolder = null, items = null;
+        try
+        {
+            Type type = Type.GetTypeFromProgID("Shell.Application");
+            if (type != null)
+            {
+                const System.Reflection.BindingFlags call = System.Reflection.BindingFlags.InvokeMethod;
+                const System.Reflection.BindingFlags property = System.Reflection.BindingFlags.GetProperty;
+                shell = Activator.CreateInstance(type);
+                appsFolder = type.InvokeMember("NameSpace", call, null, shell, new object[] { "shell:AppsFolder" });
+                if (appsFolder != null)
+                {
+                    items = appsFolder.GetType().InvokeMember("Items", call, null, appsFolder, null);
+                    foreach (object item in (System.Collections.IEnumerable)items)
+                    {
+                        try
+                        {
+                            string name = Convert.ToString(item.GetType().InvokeMember("Name", property, null, item, null));
+                            if (!String.IsNullOrWhiteSpace(name)) AddApp(apps, name, null, null);
+                        }
+                        finally { Release(item); }
+                    }
+                }
+            }
+        }
+        catch (System.Runtime.InteropServices.COMException) { }
+        catch (System.Reflection.TargetInvocationException) { }
+        catch (InvalidCastException) { }
+        finally { Release(items); Release(appsFolder); Release(shell); }
+        var entries = new List<GameEntry>(apps.Values);
+        entries.Sort((a, b) => StringComparer.CurrentCultureIgnoreCase.Compare(a.Name, b.Name));
+        return entries;
+    }
+
+    private static void AddApp(Dictionary<string, GameEntry> apps, string name, string folder, string exe)
+    {
+        GameEntry previous;
+        if (!apps.TryGetValue(name, out previous) || (previous.Executable == null && exe != null))
+            apps[name] = new GameEntry(name, folder, exe);
+    }
+
+    private static string ValidFolder(string raw)
+    {
+        if (String.IsNullOrWhiteSpace(raw)) return null;
+        string path = Environment.ExpandEnvironmentVariables(raw.Trim().Trim('"'));
+        return IsLocalPath(path) && Directory.Exists(path) ? path : null;
+    }
+
+    private static string IconExecutable(string raw)
+    {
+        if (String.IsNullOrWhiteSpace(raw)) return null;
+        var match = System.Text.RegularExpressions.Regex.Match(raw.Trim(),
+            "^\"?(.+?\\.exe)\"?(?:\\s*,\\s*-?\\d+)?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!match.Success) return null;
+        string path = Environment.ExpandEnvironmentVariables(match.Groups[1].Value.Trim());
+        string name = Path.GetFileNameWithoutExtension(path);
+        if (!IsLocalPath(path) || String.IsNullOrEmpty(name) ||
+            name.StartsWith("unins", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("msiexec", StringComparison.OrdinalIgnoreCase) || !File.Exists(path)) return null;
+        return path;
+    }
+
     public void AddTabs(TabControl tabs)
     {
         AddList(tabs, "Hardware", Hardware);
         AddList(tabs, "GPU", Gpu);
         AddList(tabs, "Giochi rilevati", Games.ConvertAll(g => g.Name + "  |  " + g.Folder));
+        AddList(tabs, "App installate", Installed.ConvertAll(g => g.Name));
         AddList(tabs, "Processi e browser", Apps);
         AddList(tabs, "Servizi", Services);
         AddList(tabs, "Avvio automatico", Startup);
