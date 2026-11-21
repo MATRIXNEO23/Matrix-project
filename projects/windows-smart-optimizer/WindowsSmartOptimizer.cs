@@ -1316,54 +1316,76 @@ internal sealed class Dashboard : Form
     private void ShowAutomaticGames(object sender, EventArgs args)
     {
         using (var dialog = new Form { Text = "Avvio automatico del boost", Size = new Size(780, 520), StartPosition = FormStartPosition.CenterParent })
-        using (var list = new ListView { Dock = DockStyle.Fill, View = View.Details, CheckBoxes = true, FullRowSelect = true })
-        using (var master = new CheckBox { Text = "Attiva il boost quando rileva uno degli eseguibili spuntati", Dock = DockStyle.Top, Height = 42 })
-        using (var hint = new Label { Text = "L'ottimizzatore deve restare aperto. Ogni voce usa il suo profilo.", Dock = DockStyle.Top, Height = 25 })
-        using (var controls = new Panel { Dock = DockStyle.Bottom, Height = 43 })
+        using (var layout = new TableLayoutPanel { RowCount = 5, ColumnCount = 1, Dock = DockStyle.Fill, Padding = new Padding(10) })
+        using (var list = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true, IntegralHeight = false })
+        using (var master = new CheckBox { Text = "Attiva il boost per i programmi spuntati", Dock = DockStyle.Fill })
+        using (var hint = new Label { Text = "Spunta le caselle nella lista. L'ottimizzatore deve restare aperto.", Dock = DockStyle.Fill })
+        using (var detail = new Label { Dock = DockStyle.Fill, AutoEllipsis = true })
+        using (var controls = new Panel { Dock = DockStyle.Fill })
         using (var more = new Button { Text = "Aggiungi eseguibile", Dock = DockStyle.Left, Width = 155 })
         using (var save = new Button { Text = "Salva", Dock = DockStyle.Right, Width = 105 })
         using (var cancel = new Button { Text = "Annulla", Dock = DockStyle.Right, Width = 105, DialogResult = DialogResult.Cancel })
+        using (var fillTimer = new System.Windows.Forms.Timer { Interval = 250 })
         {
             master.Checked = automatic.Enabled;
-            list.Columns.Add("Programma", 240);
-            list.Columns.Add("File eseguibile", 500);
-            var rows = new System.Collections.Generic.Dictionary<string, ListViewItem>(StringComparer.OrdinalIgnoreCase);
-            Action<string, string, bool> add = delegate(string name, string path, bool enabledForGame)
+            var rows = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            Action<string, string, bool> add = delegate(string name, string path, bool checkedState)
             {
                 if (String.IsNullOrEmpty(path) || ExecutableIdentity.Matches(path, Application.ExecutablePath)) return;
-                ListViewItem row;
-                if (rows.TryGetValue(path, out row))
+                int index;
+                if (rows.TryGetValue(path, out index))
                 {
-                    if (enabledForGame) row.Checked = true;
+                    if (checkedState) list.SetItemChecked(index, true);
                     return;
                 }
                 try { new AutomaticGames(false, new[] { path }); }
                 catch (ArgumentException) { return; }
                 catch (InvalidDataException) { return; }
-                row = new ListViewItem(new[] { name, path }) { Tag = path, Checked = enabledForGame };
-                rows.Add(path, row);
-                list.Items.Add(row);
+                rows.Add(path, list.Items.Add(new GameEntry(name, null, path), checkedState));
             };
-            if (scanned != null)
+
+            foreach (string path in automatic.Paths)
             {
+                var known = scanned == null ? null : scanned.Games.Find(item => String.Equals(item.Executable, path, StringComparison.OrdinalIgnoreCase));
+                add(known == null ? Path.GetFileName(path) : known.Name, path, true);
+            }
+            Action fill = delegate
+            {
+                if (scanned == null)
+                {
+                    hint.Text = scanError == null ? "Scansione in corso. Puoi già aggiungere un eseguibile." : "Scansione non riuscita. Puoi aggiungere un eseguibile.";
+                    if (scanError != null) fillTimer.Stop();
+                    return;
+                }
                 foreach (GameEntry item in scanned.Games) add(item.Name, item.Executable, false);
                 foreach (GameEntry item in scanned.Installed) add(item.Name, item.Executable, false);
-            }
-            foreach (string path in automatic.Paths) add(Path.GetFileName(path), path, true);
-            list.Sorting = SortOrder.Ascending;
+                hint.Text = list.Items.Count == 0 ? "Nessun eseguibile trovato. Usa Aggiungi eseguibile." :
+                    list.Items.Count + " programmi. Clicca la casella a sinistra del nome.";
+                fillTimer.Stop();
+            };
+            fillTimer.Tick += delegate { fill(); };
+            fill();
+            if (scanned == null && scanError == null) fillTimer.Start();
+            list.SelectedIndexChanged += delegate
+            {
+                var selected = list.SelectedItem as GameEntry;
+                detail.Text = selected == null ? "" : selected.Executable;
+            };
             more.Click += delegate
             {
                 string path = SelectCatalogExecutable("Aggiungi all'avvio automatico", false);
                 if (path == null) return;
                 add(Path.GetFileName(path), path, true);
-                if (!rows.ContainsKey(path)) MessageBox.Show(dialog, "Questo eseguibile non può essere usato come avvio automatico.");
+                int index;
+                if (rows.TryGetValue(path, out index)) list.SelectedIndex = index;
+                else MessageBox.Show(dialog, "Questo eseguibile non può essere usato per l'avvio automatico.");
             };
             save.Click += delegate
             {
                 try
                 {
                     var selected = new System.Collections.Generic.List<string>();
-                    foreach (ListViewItem row in list.CheckedItems) selected.Add((string)row.Tag);
+                    foreach (GameEntry row in list.CheckedItems) selected.Add(row.Executable);
                     var next = new AutomaticGames(master.Checked, selected);
                     if (next.Enabled && next.Paths.Count == 0) throw new InvalidDataException("Spunta almeno un programma.");
                     if (automaticSession && (!next.Enabled || !next.Paths.Exists(path =>
@@ -1382,10 +1404,17 @@ internal sealed class Dashboard : Form
             controls.Controls.Add(more);
             controls.Controls.Add(cancel);
             controls.Controls.Add(save);
-            dialog.Controls.Add(list);
-            dialog.Controls.Add(controls);
-            dialog.Controls.Add(hint);
-            dialog.Controls.Add(master);
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            layout.Controls.Add(master, 0, 0);
+            layout.Controls.Add(hint, 0, 1);
+            layout.Controls.Add(list, 0, 2);
+            layout.Controls.Add(detail, 0, 3);
+            layout.Controls.Add(controls, 0, 4);
+            dialog.Controls.Add(layout);
             dialog.AcceptButton = save;
             dialog.CancelButton = cancel;
             dialog.ShowDialog(this);
