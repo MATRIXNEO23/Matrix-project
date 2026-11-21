@@ -1,9 +1,10 @@
-param([string]$Fixture,[string]$ServiceName,[string]$Result,[string]$ExpectedHash)
+param([string]$Fixture,[string]$ServiceName,[string]$Result,[string]$ExpectedHash,[string]$Adapter,[string]$AdapterHash)
 $ErrorActionPreference='Stop'
 $registered=$false
 $controller=$null
 $serviceBinary=$null
 $journal=$null
+$adapterBinary=$null
 $folder=$null
 $ownedFolder=$false
 $log=[System.Collections.Generic.List[string]]::new()
@@ -34,6 +35,14 @@ try {
  $key="HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
  $type=Get-ItemPropertyValue -LiteralPath $key -Name Start
  if($type -ne 3){throw 'Tipo di avvio inatteso.'}
+ if($Adapter){
+  $adapterBinary=Join-Path $folder 'ServiceAdapterProbe.exe'
+  Copy-Item -LiteralPath $Adapter -Destination $adapterBinary
+  if((Get-FileHash -LiteralPath $adapterBinary -Algorithm SHA256).Hash -ne $AdapterHash){throw 'Hash del collaudo adapter non valido.'}
+  & $adapterBinary $ServiceName $folder | ForEach-Object {$log.Add("Adapter: $_")}
+  if($LASTEXITCODE -ne 0){throw "Collaudo adapter fallito: $LASTEXITCODE"}
+  if((Get-ItemPropertyValue -LiteralPath $key -Name Start) -ne $type){throw 'Tipo di avvio cambiato dopo il test adapter.'}
+ }
 
  $journal=Join-Path $folder 'restore.txt'
  $bytes=[Text.Encoding]::UTF8.GetBytes("$ServiceName|Running|$type")
@@ -74,7 +83,7 @@ try {
   else {$log.Add('Servizio temporaneo rimosso.')}
  }
  if($ownedFolder -and -not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)){
-  foreach($file in @($journal,$serviceBinary)){
+  foreach($file in @($journal,$serviceBinary,$adapterBinary,(Join-Path $folder 'search.pending'))){
    if($file -and [IO.File]::Exists($file)){
     try {[IO.File]::Delete($file)}catch{$log.Add("Pulizia file: $($_.Exception.Message)");$exitCode=1}
    }
