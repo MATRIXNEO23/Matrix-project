@@ -8,7 +8,7 @@ if (-not (Test-Path -LiteralPath $compiler)) {
 if (-not (Test-Path -LiteralPath $compiler)) { throw 'Compilatore .NET Framework 4.x non trovato.' }
 
 $exe = Join-Path $PSScriptRoot 'WindowsSmartOptimizer.exe'
-& $compiler /nologo /target:winexe /platform:anycpu /optimize+ /warnaserror+ /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.ServiceProcess.dll /reference:System.Management.dll "/out:$exe" (Join-Path $PSScriptRoot 'WindowsSmartOptimizer.cs') (Join-Path $PSScriptRoot 'MachineInventory.cs')
+& $compiler /nologo /target:winexe /platform:anycpu /optimize+ /warnaserror+ /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.ServiceProcess.dll /reference:System.Management.dll "/out:$exe" (Join-Path $PSScriptRoot 'WindowsSmartOptimizer.cs') (Join-Path $PSScriptRoot 'MachineInventory.cs') (Join-Path $PSScriptRoot 'ServiceBoost.cs')
 if ($LASTEXITCODE -ne 0) { throw "Build non riuscita, codice $LASTEXITCODE." }
 if ($Test) {
     foreach ($iteration in 1..3) {
