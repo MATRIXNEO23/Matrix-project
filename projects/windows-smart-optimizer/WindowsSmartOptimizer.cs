@@ -1010,6 +1010,7 @@ internal sealed class Dashboard : Form
     private readonly Dictionary<string, List<string>> boostApps =
         new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
     private bool boostAppsTried;
+    private bool pauseSearchDuringBoost, searchTried;
     private const int BoostHotkeyId = 1;
     private const int HotkeyMessage = 0x0312;
 
@@ -1248,6 +1249,7 @@ internal sealed class Dashboard : Form
         priorityTried = false;
         relaunchTried = false;
         boostAppsTried = false;
+        searchTried = false;
         enabled.Checked = true;
         status.Text = "Boost attivo. Si applicano il profilo e le autorizzazioni correnti.";
     }
@@ -1463,7 +1465,7 @@ internal sealed class Dashboard : Form
         if (serviceStop != null) serviceStop.Set();
     }
 
-    private void StartSearchBoost()
+    private void StartSearchBoost(bool configured)
     {
         if (game == null || game.HasExited || !enabled.Checked || profile.SelectedIndex == 0 || waitingAfterRestore)
         {
@@ -1471,7 +1473,7 @@ internal sealed class Dashboard : Form
             return;
         }
         if (serviceWorker != null && !serviceWorker.HasExited) return;
-        if (MessageBox.Show(this, "L'indicizzazione di Windows Search sarà sospesa. Le ricerche possono rallentare. Il servizio tornerà attivo al ripristino o all'uscita dal gioco.",
+        if (!configured && MessageBox.Show(this, "L'indicizzazione di Windows Search sarà sospesa. Le ricerche possono rallentare. Il servizio tornerà attivo al ripristino o all'uscita dal gioco.",
             "Intervento su Windows Search", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         try
         {
@@ -1498,11 +1500,20 @@ internal sealed class Dashboard : Form
         using (var services = new Panel { Dock = DockStyle.Bottom, Height = 37 })
         using (var chooseOptional = new Button { Text = "Scegli app secondaria", Width = 186, Dock = DockStyle.Fill })
         using (var chooseBatch = new Button { Text = "App da chiudere e riaprire", Dock = DockStyle.Top, Height = 35 })
+        using (var searchOption = new CheckBox { Text = "Sospendi l’indicizzazione di Windows durante il boost (richiede UAC)", Dock = DockStyle.Top, Height = 33 })
         using (var searchPause = new Button { Text = "Pausa Windows Search", Width = 205, Dock = DockStyle.Left })
         using (var searchRestore = new Button { Text = "Ripristina servizio", Width = 172, Dock = DockStyle.Right })
         {
             chooseBatch.Click += ShowBoostApps;
             dialog.Controls.Add(chooseBatch);
+            searchOption.Checked = pauseSearchDuringBoost;
+            searchOption.CheckedChanged += delegate
+            {
+                pauseSearchDuringBoost = searchOption.Checked;
+                searchTried = false;
+                if (!pauseSearchDuringBoost) StopManagedService();
+            };
+            dialog.Controls.Add(searchOption);
             actionOption.Checked = allow.Checked;
             actionOption.CheckedChanged += delegate { allow.Checked = actionOption.Checked; };
             powerOption.Checked = allowPower;
@@ -1559,7 +1570,7 @@ internal sealed class Dashboard : Form
             services.Controls.Add(searchPause);
             services.Controls.Add(searchRestore);
             chooseOptional.Click += delegate { StartOptional(sender, args); };
-            searchPause.Click += delegate { StartSearchBoost(); };
+            searchPause.Click += delegate { searchTried = true; StartSearchBoost(false); };
             searchRestore.Click += delegate
             {
                 if (serviceWorker != null && !serviceWorker.HasExited) { StopManagedService(); return; }
@@ -1798,17 +1809,7 @@ internal sealed class Dashboard : Form
                 status.Text = "Scorciatoia ignorata: nessun gioco configurato è in esecuzione.";
                 return;
             }
-            if (enabled.Checked)
-            {
-                enabled.Checked = false;
-                if (!action.Pending) status.Text = "Game Booster spento.";
-            }
-            else
-            {
-                waitingAfterRestore = false;
-                enabled.Checked = true;
-                status.Text = "Game Booster attivo per il gioco. Si applicano il profilo e le spunte correnti.";
-            }
+            ToggleBoost(this, EventArgs.Empty);
             return;
         }
         base.WndProc(ref message);
@@ -2174,6 +2175,7 @@ internal sealed class Dashboard : Form
                 priorityTried = false;
                 relaunchTried = false;
                 boostAppsTried = false;
+                searchTried = false;
                 relaunchGame = null;
                 busySamples = 0;
                 if (!Recover("Gioco terminato. Priorità originale ripristinata.")) return;
@@ -2231,6 +2233,12 @@ internal sealed class Dashboard : Form
                 }
             }
             CloseBoostApps();
+            if (pauseSearchDuringBoost && !searchTried && profile.SelectedIndex != 0 &&
+                (serviceWorker == null || serviceWorker.HasExited))
+            {
+                searchTried = true;
+                StartSearchBoost(true);
+            }
             if (relaunch.Pending && ramBeforeClose.HasValue && optional != null && optional.HasExited)
             {
                 status.Text = String.Format("App chiusa. RAM disponibile di sistema: {0} → {1} MiB. Riapertura al ripristino.",
