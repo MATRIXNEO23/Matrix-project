@@ -1010,6 +1010,9 @@ internal sealed class Dashboard : Form
     private readonly Dictionary<string, List<string>> boostApps =
         new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
     private bool boostAppsTried;
+    private readonly List<Process> closingApps = new List<Process>();
+    private ulong batchRamBefore;
+    private string batchSkipped;
     private bool pauseSearchDuringBoost, searchTried;
     private const int BoostHotkeyId = 1;
     private const int HotkeyMessage = 0x0312;
@@ -1134,6 +1137,7 @@ internal sealed class Dashboard : Form
             Recover("Priorità ripristinata.");
         };
         FormClosed += delegate {
+            ClearClosingApps();
             timer.Dispose();
             io.Dispose();
             enabled.Dispose(); allow.Dispose(); shortcut.Dispose();
@@ -1172,6 +1176,10 @@ internal sealed class Dashboard : Form
             if (allowWindow) chosen.Add("minimizzazione");
         }
         if (allowPower) chosen.Add("energia");
+        List<string> selected;
+        if (gamePath != null && boostApps.TryGetValue(gamePath, out selected) && selected.Count > 0)
+            chosen.Add(selected.Count + " app da chiudere");
+        if (pauseSearchDuringBoost) chosen.Add("indicizzazione");
         actionSummary.Text = profile.SelectedIndex == 0 ? "Conservativo · solo anteprima" :
             chosen.Count == 0 ? "Nessuna azione automatica selezionata" : String.Join(", ", chosen.ToArray());
         if (profile.SelectedIndex != 0 && (allow.Checked || allowWindow || relaunchGame != null) &&
@@ -1179,6 +1187,22 @@ internal sealed class Dashboard : Form
             actionSummary.Text += secondaryPath == null ? " · scegli l'app" :
                 secondaryAmbiguous ? " · scelta ambigua" : " · app non aperta";
         actionSummary.ForeColor = Color.FromArgb(190, 204, 220);
+    }
+
+    private void ClearClosingApps()
+    {
+        foreach (var process in closingApps) process.Dispose();
+        closingApps.Clear();
+        batchSkipped = null;
+    }
+
+    private void ShowClosureResults(Telemetry now)
+    {
+        if (closingApps.Count == 0 && batchSkipped == null) return;
+        int closed = closingApps.Count(process => process.HasExited);
+        actionSummary.Text = String.Format("App chiuse {0}/{1} · RAM disponibile {2} → {3} MiB",
+            closed, closingApps.Count, batchRamBefore >> 20, now.Available >> 20);
+        if (batchSkipped != null) actionSummary.Text += "\nSaltate: " + batchSkipped;
     }
 
     private void ShowTools(object sender, EventArgs args)
@@ -1900,7 +1924,7 @@ internal sealed class Dashboard : Form
         }
     }
 
-    private void CloseBoostApps()
+    private void CloseBoostApps(Telemetry before)
     {
         if (boostAppsTried || profile.SelectedIndex == 0) return;
         boostAppsTried = true;
@@ -1908,20 +1932,25 @@ internal sealed class Dashboard : Form
         if (!boostApps.TryGetValue(gamePath, out selected) || selected.Count == 0) return;
         EnsureWatcher();
         if (watcher == null || watcher.HasExited) throw new IOException("Monitor di ripristino non disponibile.");
-        int requested = 0;
+        batchRamBefore = before.Available;
         var skipped = new List<string>();
         foreach (string file in selected)
         {
+            Process process = null;
             try
             {
-                using (var process = Optimizer.FindGame(file))
-                    if (process != null && IsSecondaryPath(file) && relaunch.ApplyOne(process)) requested++;
-                    else skipped.Add(Path.GetFileName(file));
+                process = Optimizer.FindGame(file);
+                if (process != null && IsSecondaryPath(file) && relaunch.ApplyOne(process))
+                {
+                    closingApps.Add(process);
+                    process = null;
+                }
+                else skipped.Add(Path.GetFileName(file));
             }
             catch (Exception) { skipped.Add(Path.GetFileName(file)); }
+            finally { if (process != null) process.Dispose(); }
         }
-        status.Text = "Richieste di chiusura inviate: " + requested;
-        if (skipped.Count > 0) status.Text += " · Saltate: " + String.Join(", ", skipped);
+        batchSkipped = skipped.Count == 0 ? null : String.Join(", ", skipped);
     }
 
     private System.Collections.Generic.List<GameEntry> RunningSecondaryApps()
@@ -2104,6 +2133,7 @@ internal sealed class Dashboard : Form
 
     private bool Recover(string message)
     {
+        ClearClosingApps();
         if (!action.Pending && !power.Pending && !windowAction.Pending && !relaunch.Pending) return true;
         try
         {
@@ -2232,7 +2262,8 @@ internal sealed class Dashboard : Form
                     status.Text = "Chiusura richiesta. L'app sarà riaperta al ripristino se è uscita.";
                 }
             }
-            CloseBoostApps();
+            CloseBoostApps(now);
+            ShowClosureResults(now);
             if (pauseSearchDuringBoost && !searchTried && profile.SelectedIndex != 0 &&
                 (serviceWorker == null || serviceWorker.HasExited))
             {
