@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -12,6 +13,9 @@ using Microsoft.Win32;
 internal sealed class ServiceBoost
 {
     public const string Search = "WSearch";
+    public const string Printing = "Spooler";
+    public const string Prefetch = "SysMain";
+    private static readonly string[] Managed = { Search, Printing, Prefetch };
     private readonly string folder;
     private readonly string service;
     private readonly string journal;
@@ -19,12 +23,53 @@ internal sealed class ServiceBoost
     public ServiceBoost(string directory, string name)
     {
         Guid fixture;
-        if (name != Search && !(name.StartsWith("MatrixOptimizerTest-", StringComparison.Ordinal) &&
+        if (Array.IndexOf(Managed, name) < 0 && !(name.StartsWith("MatrixOptimizerTest-", StringComparison.Ordinal) &&
             Guid.TryParseExact(name.Substring("MatrixOptimizerTest-".Length), "N", out fixture)))
             throw new InvalidOperationException("Servizio fuori dall'elenco consentito.");
         folder = directory;
         service = name;
-        journal = Path.Combine(directory, "search.pending");
+        journal = Path.Combine(directory, name == Search || Array.IndexOf(Managed, name) < 0 ?
+            "search.pending" : "service-" + name + ".pending");
+    }
+
+    public static bool Pending(string directory)
+    {
+        foreach (string name in Managed)
+            if (File.Exists(new ServiceBoost(directory, name).journal)) return true;
+        return false;
+    }
+
+    public static string PausedServices(string directory)
+    {
+        var paused = new List<string>();
+        foreach (string name in Managed)
+        {
+            if (!File.Exists(new ServiceBoost(directory, name).journal)) continue;
+            try
+            {
+                using (var controller = new ServiceController(name))
+                    if (controller.Status == ServiceControllerStatus.Stopped) paused.Add(name);
+            }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
+        }
+        return String.Join(", ", paused);
+    }
+
+    private static void RestoreManaged(string directory)
+    {
+        var errors = new List<Exception>();
+        for (int i = Managed.Length - 1; i >= 0; i--)
+        {
+            try { new ServiceBoost(directory, Managed[i]).Restore(); }
+            catch (Exception error) { errors.Add(error); }
+        }
+        if (errors.Count > 0) throw new AggregateException("Ripristino dei servizi incompleto.", errors);
+    }
+
+    private bool CanRestoreStartupType(int startup)
+    {
+        return startup == 3 || (startup == 2 && Array.IndexOf(Managed, service) >= 0);
     }
 
     private static void DemandAdministrator()
@@ -84,7 +129,7 @@ internal sealed class ServiceBoost
         DemandAdministrator();
         if (File.Exists(journal)) throw new IOException("Ripristino del servizio già in attesa.");
         int original = StartupType();
-        if (original != (service == Search ? 2 : 3)) throw new InvalidOperationException("Tipo di avvio non compatibile.");
+        if (!CanRestoreStartupType(original)) throw new InvalidOperationException("Tipo di avvio non compatibile.");
         using (var controller = new ServiceController(service))
         {
             if (controller.Status != ServiceControllerStatus.Running || !controller.CanStop)
@@ -119,7 +164,7 @@ internal sealed class ServiceBoost
         string[] record = File.ReadAllLines(journal);
         int saved;
         if (record.Length != 3 || record[0] != "MatrixService/1" || record[1] != service ||
-            !Int32.TryParse(record[2], out saved) || saved != (service == Search ? 2 : 3))
+            !Int32.TryParse(record[2], out saved) || !CanRestoreStartupType(saved))
             throw new InvalidDataException("Il journal del servizio non è valido.");
         if (StartupType() == saved)
         {
@@ -143,10 +188,10 @@ internal sealed class ServiceBoost
 
     private static string Channel(string id) { return @"Local\Matrix.Optimizer.Search." + id; }
 
-    public static Process RunElevated(Process owner, Process game, string token)
+    public static Process RunElevated(Process owner, Process game, string token, int selection)
     {
-        string args = String.Format(CultureInfo.InvariantCulture, "--search-boost {0} {1} {2} {3} {4}",
-            owner.Id, owner.StartTime.ToFileTimeUtc(), game.Id, game.StartTime.ToFileTimeUtc(), token);
+        string args = String.Format(CultureInfo.InvariantCulture, "--search-boost {0} {1} {2} {3} {4} {5}",
+            owner.Id, owner.StartTime.ToFileTimeUtc(), game.Id, game.StartTime.ToFileTimeUtc(), token, selection);
         return Process.Start(new ProcessStartInfo(Application.ExecutablePath, args) { UseShellExecute = true, Verb = "runas" });
     }
 
@@ -167,12 +212,14 @@ internal sealed class ServiceBoost
                     try { taken = mutex.WaitOne(3000); }
                     catch (AbandonedMutexException) { taken = true; }
                     if (!taken) return 1;
-                    try { new ServiceBoost(state, Search).Restore(); return 0; }
+                    try { RestoreManaged(state); return 0; }
                     finally { mutex.ReleaseMutex(); }
                 }
             }
             Guid token;
-            if (args.Length != 6 || !Guid.TryParseExact(args[5], "N", out token)) return 2;
+            int selection;
+            if (args.Length != 7 || !Guid.TryParseExact(args[5], "N", out token) ||
+                !Int32.TryParse(args[6], out selection) || selection < 1 || selection >= (1 << Managed.Length)) return 2;
             using (var owner = Process.GetProcessById(Int32.Parse(args[1])))
             using (var game = Process.GetProcessById(Int32.Parse(args[3])))
             using (var self = Process.GetCurrentProcess())
@@ -189,15 +236,19 @@ internal sealed class ServiceBoost
                 if (!taken) return 1;
                 try
                 {
-                    var transaction = new ServiceBoost(state, Search);
                     try
                     {
-                        transaction.Restore();
-                        if (game.HasExited || owner.HasExited || stop.WaitOne(0)) return 2;
-                        transaction.Pause();
+                        RestoreManaged(state);
+                        for (int i = 0; i < Managed.Length && !game.HasExited && !owner.HasExited && !stop.WaitOne(0); i++)
+                        {
+                            if ((selection & (1 << i)) == 0) continue;
+                            try { new ServiceBoost(state, Managed[i]).Pause(); }
+                            catch (InvalidOperationException) { }
+                            catch (System.ComponentModel.Win32Exception) { }
+                        }
                         while (!stop.WaitOne(500) && !owner.HasExited && !game.HasExited) { }
                     }
-                    finally { transaction.Restore(); }
+                    finally { RestoreManaged(state); }
                     return 0;
                 }
                 finally { mutex.ReleaseMutex(); }
@@ -205,7 +256,7 @@ internal sealed class ServiceBoost
         }
         catch (Exception error)
         {
-            MessageBox.Show(error.Message, "Windows Search — collaudo e ripristino", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(error.Message, "Servizi Boost — sospensione e ripristino", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return 1;
         }
     }
