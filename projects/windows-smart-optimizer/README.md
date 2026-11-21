@@ -161,3 +161,11 @@ Azioni Boost include Pausa Windows Search e Ripristina servizio. La pausa è man
 Il codice `ServiceBoost` usato dalla dashboard è stato compilato anche con `ServiceAdapterProbe.cs` e provato live su un servizio temporaneo: arresto SCM, scrittura anticipata, rilettura del journal e ritorno a Running con tipo di avvio Manuale invariato. Il servizio temporaneo è stato rimosso. Windows Search è rimasto in esecuzione per tutto il collaudo. La pausa effettiva di Windows Search e i benefici in gioco restano da verificare. Nessun altro servizio è selezionabile.
 
 Build locale di 112.640 byte, SHA-256 `5ED3409AA9CD272759ADADEB35A08F9E94047431082A91DCA790AE9DD8561E9A` e tre test integrati riusciti.
+
+### Schermata Boost semplificata e osservazioni IObit
+
+La finestra principale separa gioco/avvio automatico, profilo/azioni e il comando principale che alterna Attiva Boost e Disattiva e ripristina. Lo stato distingue boost spento, in attesa di gioco, anteprima e boost attivo. I controlli avanzati, le diagnosi, i profili e il ripristino d'emergenza sono in Strumenti. La scelta dell'app secondaria è in Configura azioni.
+
+Dall'installazione IObit sono stati verificati i file `GameBooster.ini`, `Process.ini` e `Service.ini`. Quest'ultimo distingue gruppi per Windows 2000, XP, Vista, 7, 8 e servizi di terze parti. Il log esistente di ripristino registra servizi riavviati, lettura di processi da un file temporaneo, rilancio di Explorer per percorso, ripristino appunti, piano energetico e aggiornamenti. Il log non prova la ricostruzione dello stato delle finestre. IObit era già in esecuzione. Il controllo della sua finestra è scaduto e il boost IObit non è stato applicato durante il confronto.
+
+Build di 115.200 byte con tre test integrati superati, prova UI dei cinque comandi, tasto Attiva/Disattiva e apertura Strumenti. Dashboard aggiornata e aperta sul PC. SHA-256 `5EEC1E0C11123973B90B8FFF2232BBCDB9CEBAF935DD15FAEC54A27929DEDEDA`.
