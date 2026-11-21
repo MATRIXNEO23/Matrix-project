@@ -3,12 +3,16 @@
 # Per mostrare i suggerimenti oltre l'80%: .\Mostra-Ram.ps1 -SogliaRamPercento 80
 param(
     [switch]$ConfermaAssociazioni,
+    [switch]$ScegliApp,
     [ValidateRange(1, 100)]
     [int]$SogliaRamPercento
 )
 
 $ErrorActionPreference = 'Stop'
 $usaSoglia = $PSBoundParameters.ContainsKey('SogliaRamPercento')
+if ($ScegliApp -and -not $usaSoglia) {
+    throw 'Specifica -SogliaRamPercento per scegliere dai suggerimenti.'
+}
 $caricoRam = $null
 if ($usaSoglia) {
     try {
@@ -64,7 +68,7 @@ foreach ($process in Get-CimInstance Win32_Process -Property ProcessId, ParentPr
         Started = $process.CreationDate
         Name = $process.Name
         Path = $path
-        Directory = if ($path) { [IO.Path]::GetDirectoryName($path) }
+        Directory = $(if ($path) { [IO.Path]::GetDirectoryName($path) })
         Product = $info.ProductName
         Publisher = $info.CompanyName
         Bytes = $bytes
@@ -212,7 +216,7 @@ foreach ($child in $byId.Values) {
     }
 }
 
-$byId.Values | Group-Object { $groups[$_.Id] } | ForEach-Object {
+$reports = @($byId.Values | Group-Object { $groups[$_.Id] } | ForEach-Object {
     $members = $_.Group
     $measured = @($members | Where-Object { $null -ne $_.Bytes })
     $reference = $members | Where-Object Path -EQ $_.Name | Select-Object -First 1
@@ -256,4 +260,53 @@ $byId.Values | Group-Object { $groups[$_.Id] } | ForEach-Object {
         $report.DaValutare = [bool]($null -ne $caricoRam -and $caricoRam -gt $SogliaRamPercento -and $eligible)
     }
     [pscustomobject]$report
-} | Sort-Object RamPrivataByte -Descending
+} | Sort-Object RamPrivataByte -Descending)
+if (-not $ScegliApp) {
+    $reports
+    return
+}
+
+$windowsSession = (Get-Process -Id $PID).SessionId
+$choices = @(foreach ($report in $reports | Where-Object DaValutare) {
+    foreach ($member in $report.Processi) {
+        $process = Get-Process -Id $member.Id -ErrorAction SilentlyContinue
+        if (-not $process) { continue }
+        try {
+            # CIM conserva l'ora di creazione con precisione al microsecondo.
+            if ($process.Id -ne $PID -and $process.SessionId -eq $windowsSession -and
+                $process.Path -eq $member.Path -and
+                [math]::Abs($process.StartTime.Ticks - $byId[$member.Id].Started.Ticks) -lt 10 -and
+                $process.MainWindowHandle -ne [IntPtr]::Zero) {
+                [pscustomobject]@{
+                    Applicazione = $report.Applicazione
+                    Titolo = $process.MainWindowTitle
+                    Id = $process.Id
+                    Percorso = $process.Path
+                    Avvio = $process.StartTime
+                    Finestra = $process.MainWindowHandle
+                    RamMiB = [math]::Round($report.RamPrivataByte / 1MB, 1)
+                }
+            }
+        } catch [System.InvalidOperationException], [System.ComponentModel.Win32Exception] {
+            # Il processo potrebbe essere gia uscito o non accessibile.
+        } finally {
+            $process.Dispose()
+        }
+    }
+})
+if (-not $choices.Count) {
+    Write-Host 'Nessun suggerimento con una finestra selezionabile.'
+    return
+}
+
+for ($index = 0; $index -lt $choices.Count; $index++) {
+    $choice = $choices[$index]
+    Write-Host ("{0}. {1} - {2} ({3} MiB di RAM privata nel gruppo)" -f
+        ($index + 1), $choice.Applicazione, $choice.Titolo, $choice.RamMiB)
+}
+$selection = 0
+if (-not [int]::TryParse((Read-Host 'Numero della finestra da valutare, Invio per annullare'), [ref]$selection) -or
+    $selection -lt 1 -or $selection -gt $choices.Count) { return }
+
+$choice = $choices[$selection - 1]
+& (Join-Path $PSScriptRoot 'Chiudi-App.ps1') -IdProcesso $choice.Id -PercorsoAtteso $choice.Percorso -AvvioAtteso $choice.Avvio -FinestraAttesa $choice.Finestra

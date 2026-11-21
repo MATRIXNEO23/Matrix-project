@@ -2,7 +2,10 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateRange(1, 2147483647)]
-    [int]$IdProcesso
+    [int]$IdProcesso,
+    [string]$PercorsoAtteso,
+    [datetime]$AvvioAtteso,
+    [IntPtr]$FinestraAttesa
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +31,12 @@ try {
     if (-not $path -or -not $started -or $app.SessionId -ne [Diagnostics.Process]::GetCurrentProcess().SessionId -or
         $path.StartsWith($windowsRoot, [StringComparison]::OrdinalIgnoreCase) -or $window -eq [IntPtr]::Zero) {
         throw 'Il processo non ha una finestra accessibile in questa sessione o si trova nella cartella di Windows.'
+    }
+
+    if (($PSBoundParameters.ContainsKey('PercorsoAtteso') -and $path -ne $PercorsoAtteso) -or
+        ($PSBoundParameters.ContainsKey('AvvioAtteso') -and $started -ne $AvvioAtteso) -or
+        ($PSBoundParameters.ContainsKey('FinestraAttesa') -and $window -ne $FinestraAttesa)) {
+        throw 'La finestra selezionata e cambiata. Ripeti la rilevazione.'
     }
 
     $answer = Read-Host "Chiedere la chiusura normale di $($app.ProcessName) (PID $IdProcesso), $path? [s/N]"
