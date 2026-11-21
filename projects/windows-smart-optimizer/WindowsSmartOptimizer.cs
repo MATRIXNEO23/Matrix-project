@@ -223,9 +223,10 @@ internal static class Optimizer
                 if (worker.PriorityClass != ProcessPriorityClass.Idle || action.Pending)
                     throw new Exception("Modifica concorrente sovrascritta.");
                 worker.PriorityClass = initial;
+                VerifyJournalFailures(worker, action, directory, initial);
                 VerifyGameTree(gamePath, directory);
                 File.WriteAllText(Path.Combine(directory, "result.txt"),
-                    "OK: inventario Steam sintetico, telemetria, rilevamento/uscita gioco simulato, priorità, ripristino, recupero journal, arresto proprietario, scadenza, modifica concorrente e gioco con processo figlio.");
+                    "OK: inventario Steam sintetico, telemetria, rilevamento/uscita gioco simulato, priorità, ripristino, recupero journal, arresto proprietario, scadenza, modifica concorrente, registri non validi e gioco con processo figlio.");
             }
             finally
             {
@@ -234,6 +235,59 @@ internal static class Optimizer
             }
         }
     }
+    private static void VerifyJournalFailures(Process worker, PriorityAction action, string directory, ProcessPriorityClass original)
+    {
+        string journal = Path.Combine(directory, "priority.pending");
+        string missingDirectory = Path.Combine(directory, "fixture-not-a-directory");
+        try
+        {
+            File.WriteAllText(journal, "corrotto");
+            bool rejected = false;
+            try { action.Restore(); }
+            catch (InvalidDataException) { rejected = true; }
+            worker.Refresh();
+            if (!rejected || File.ReadAllText(journal) != "corrotto" || worker.PriorityClass != original)
+                throw new Exception("Registro corrotto non conservato o processo alterato.");
+            File.Delete(journal);
+
+            File.WriteAllText(missingDirectory, "fixture");
+            rejected = false;
+            try { new PriorityAction(missingDirectory).Apply(worker); }
+            catch (IOException) { rejected = true; }
+            worker.Refresh();
+            if (!rejected || worker.PriorityClass != original)
+                throw new Exception("Intervento consentito senza journal durabile.");
+
+            string id = worker.Id.ToString(CultureInfo.InvariantCulture);
+            long start = worker.StartTime.ToFileTimeUtc();
+            string path = worker.MainModule.FileName;
+            worker.PriorityClass = ProcessPriorityClass.BelowNormal;
+            File.WriteAllLines(journal, new[] { id, (start - 1).ToString(CultureInfo.InvariantCulture), path });
+            action.Restore();
+            worker.Refresh();
+            if (action.Pending || worker.PriorityClass != ProcessPriorityClass.BelowNormal)
+                throw new Exception("Il rollback ha alterato una diversa istanza dello stesso PID.");
+
+            File.WriteAllLines(journal, new[] { id, start.ToString(CultureInfo.InvariantCulture), path + ".different" });
+            action.Restore();
+            worker.Refresh();
+            if (action.Pending || worker.PriorityClass != ProcessPriorityClass.BelowNormal)
+                throw new Exception("Il rollback ha alterato un eseguibile diverso.");
+
+            File.WriteAllLines(journal, new[] { id, start.ToString(CultureInfo.InvariantCulture), path });
+            action.Restore();
+            worker.Refresh();
+            if (action.Pending || worker.PriorityClass != original)
+                throw new Exception("Il rollback del journal precedente è fallito.");
+        }
+        finally
+        {
+            if (!worker.HasExited && worker.PriorityClass != original) worker.PriorityClass = original;
+            File.Delete(journal);
+            File.Delete(missingDirectory);
+        }
+    }
+
     private static void VerifyGameTree(string exe, string directory)
     {
         string marker = Path.Combine(directory, "child.pid");
