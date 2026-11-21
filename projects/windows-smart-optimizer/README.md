@@ -47,3 +47,14 @@ Intel PresentMon 2.6.0, Minecraft in finestra sul PC Windows 10 da 9,98 GiB. Due
 | 2 | 56,59 → 55,84 | 33,31 → 33,32 ms |
 
 Gli FPS derivano dalla media degli intervalli di cambio immagine della catena di presentazione di Minecraft. Il 99° percentile è rimasto intorno a 33,34 ms. L'effetto positivo della prima coppia non si è ripetuto. Questa prova breve non dimostra un aumento stabile di FPS o fluidità e non misura la latenza di input.
+
+### Ripetizione durante la partita
+
+L'utente ha confermato di essere nel mondo. Due ulteriori coppie da otto secondi, Minecraft in primo piano, ordine spento/acceso e acceso/spento. La priorità è stata ridotta e ripristinata soltanto per il carico CPU sintetico. L'inquadratura ferma è stata richiesta e non verificata visivamente.
+
+| Prova | FPS visualizzati spento → acceso | Intervalli di almeno 25 ms spento → acceso |
+| --- | ---: | ---: |
+| 1 | 59,88 → 56,47 | 1 → 27 |
+| 2 | 49,90 → 57,86 | 80 → 17 |
+
+Minecraft ha presentato 59,78–59,97 FPS in tutti e quattro i campioni. La variabilità maggiore è stata negli intervalli tra immagini visualizzate. Una coppia è peggiorata e una è migliorata. Questo test non giustifica abilitare automaticamente la riduzione di priorità per Minecraft nelle condizioni osservate.
