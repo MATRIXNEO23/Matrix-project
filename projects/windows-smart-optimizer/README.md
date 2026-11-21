@@ -6,7 +6,7 @@ Primo incremento funzionante per Windows. L'app campiona RAM fisica, memoria imp
 
 - Compilare nella cartella del progetto con `powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\Compila.ps1 -Test`.
 - Aprire `WindowsSmartOptimizer.exe`. La build usa il compilatore .NET Framework già disponibile sul PC di prova. L'eseguibile è portatile e usa WinForms e le API Windows.
-- Scegliere il file eseguibile del gioco. Per provare l'intervento, avviare un'app secondaria dalla dashboard, spuntare entrambe le opzioni e scegliere un profilo operativo. Il gioco viene rilevato in base al percorso e alla sessione.
+- Scegliere il file eseguibile del gioco. Per provare l'intervento, avviare un'app secondaria dalla dashboard, spuntare entrambe le opzioni e scegliere un profilo operativo. Il gioco viene rilevato nella stessa sessione in base al percorso o all'identità del file Windows, se l'installazione espone due percorsi per lo stesso eseguibile.
 
 ## Policy e ripristino
 
@@ -30,8 +30,9 @@ L'interfaccia mostra la RAM disponibile prima e dopo il ripristino. `misure.tsv`
 
 ## Prove e criteri ancora aperti
 
-- Build Windows x64, versione 10.0.19045, 9,98 GiB visibili. Eseguibile da 26.112 byte. SHA-256 `2143BD3E95F6DDE013C4BB66149B65CF38B213234522ECAC62614252F9DB1DD0`.
+- Build Windows x64, versione 10.0.19045, 9,98 GiB visibili. Eseguibile da 27.136 byte. SHA-256 `32A84F8BD4047BE50CCE44FC991535A310933495AA1A24E9AE5FFF920150C0E6`.
 - Tre esecuzioni di `-Test` riuscite, con verifica delle letture di base, rilevamento e arresto del gioco sintetico, variazione e ripristino della priorità, recupero del registro e percorso di recupero dopo l'arresto del proprietario. I test usano processi creati apposta.
 - Dashboard avviata e reattiva nella build precedente al limite temporale. A riposo, in una rilevazione breve, 33,59 MiB di working set e 9,9 MiB di working set privato secondo il contatore Windows. Nessun incremento di CPU osservato nella finestra di circa sei secondi. Il dato va ripetuto sotto carico.
 - Benchmark sintetico: due carichi sullo stesso core, con campioni di 1,25 secondi. Il primo carico ha ricevuto il 47,9%, 53,9% e 51,9% della CPU attribuita ai due carichi a pari priorità. Con la riduzione dell'altro carico, il primo ha ricevuto il 100% in tutti e tre i campioni. La priorità è stata ripristinata in tutti i casi. Questo evidenzia il rischio di rallentare il carico secondario e ha motivato il limite temporale. Non misura FPS o latenza di un gioco. `Benchmark.cs` si compila insieme a `WindowsSmartOptimizer.cs` con le stesse referenze di `Compila.ps1`, aggiungendo `/main:Benchmark`, usando `/target:exe` e passando al binario una cartella temporanea vuota.
-- Rimangono da verificare il collaudo su un gioco reale e su hardware rappresentativo da 4 GB, il confronto indipendente sistematico della telemetria e il ripristino dopo un riavvio reale. Da completare la mappa delle dipendenze del gioco, l'adattamento basato su benefici ripetibili e le misure comparabili di latenza e FPS. Il prototipo non certifica benefici di prestazioni.
+- Prova con Minecraft for Windows 1.26.6501.0. Il rilevatore ha associato l'eseguibile selezionato in XboxGames al processo avviato da WindowsApps, dopo aver verificato che i percorsi puntano allo stesso file. La prova ha rilevato l'uscita normale di Minecraft e verificato il ripristino della priorità di un processo sintetico separato. La prova si è limitata alla finestra del gioco, senza aprire mondi.
+- Rimangono da verificare il comportamento durante una partita e su hardware rappresentativo da 4 GB, il confronto indipendente sistematico della telemetria e il ripristino dopo un riavvio reale. Da completare la mappa delle dipendenze del gioco, l'adattamento basato su benefici ripetibili e le misure comparabili di latenza e FPS. Il prototipo non certifica benefici di prestazioni.
