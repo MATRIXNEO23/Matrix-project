@@ -169,3 +169,11 @@ La finestra principale separa gioco/avvio automatico, profilo/azioni e il comand
 Dall'installazione IObit sono stati verificati i file `GameBooster.ini`, `Process.ini` e `Service.ini`. Quest'ultimo distingue gruppi per Windows 2000, XP, Vista, 7, 8 e servizi di terze parti. Il log esistente di ripristino registra servizi riavviati, lettura di processi da un file temporaneo, rilancio di Explorer per percorso, ripristino appunti, piano energetico e aggiornamenti. Il log non prova la ricostruzione dello stato delle finestre. IObit era già in esecuzione. Il controllo della sua finestra è scaduto e il boost IObit non è stato applicato durante il confronto.
 
 Build di 115.200 byte con tre test integrati superati, prova UI dei cinque comandi, tasto Attiva/Disattiva e apertura Strumenti. Dashboard aggiornata e aperta sul PC. SHA-256 `5EEC1E0C11123973B90B8FFF2232BBCDB9CEBAF935DD15FAEC54A27929DEDEDA`.
+
+### Flusso Boost attuale
+
+In Configura azioni, App da chiudere e riaprire mostra le app aperte compatibili con caselle di selezione. La scelta vale per il gioco e per la sessione dell'ottimizzatore. Un profilo operativo invia richieste di chiusura normale, registra ogni intervento separatamente e tenta la riapertura al ripristino o all'uscita del gioco. Il riepilogo mostra le uscite effettive e la variazione della RAM disponibile di sistema. Edge e Chrome con una sola finestra usano l'opzione di ripristino dell'ultima sessione alla riapertura. Questa opzione è stata verificata con browser simulati.
+
+Le spunte per Windows Search, Spooler e SysMain usano un unico processo con autorizzazione amministrativa. Si possono sospendere i servizi avviati, arrestabili e privi di dipendenti attivi. Ogni servizio ha il proprio registro di ripristino. Il tipo di avvio resta invariato. Ctrl+Alt+F10, se abilitato, usa lo stesso ciclo del pulsante principale.
+
+Il collaudo amministrativo sul PC ha usato gli adapter della build corrente con i tre servizi reali. SCM ha confermato l'arresto di tutti e tre e il ritorno allo stato Running. Il controllo successivo ha confermato il tipo di avvio Automatico per tutti e tre. Questa prova verifica gli adapter dei servizi separatamente dal flusso della dashboard con Minecraft.
