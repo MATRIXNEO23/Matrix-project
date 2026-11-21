@@ -884,7 +884,8 @@ internal sealed class Dashboard : Form
     private bool allowPower, powerTried, allowWindow, windowTried, priorityTried;
     private MachineInventory scanned;
     private string scanError;
-    private bool loadingPreferences;
+    private bool loadingPreferences, automaticSession;
+    private AutomaticGames automatic = new AutomaticGames(false, new string[0]);
     private int busySamples;
     private Telemetry beforeAction;
     private readonly Stopwatch actionTime = new Stopwatch();
@@ -895,8 +896,8 @@ internal sealed class Dashboard : Form
         power = new PowerPlanAction(action.StateFolder);
         windowAction = new WindowAction(action.StateFolder);
         Text = "Windows Smart Optimizer";
-        ClientSize = new Size(700, 588);
-        MinimumSize = new Size(710, 628);
+        ClientSize = new Size(700, 632);
+        MinimumSize = new Size(710, 672);
         BackColor = Color.FromArgb(23, 27, 35);
         ForeColor = Color.FromArgb(233, 237, 245);
         Font = new Font("Segoe UI", 10);
@@ -944,12 +945,24 @@ internal sealed class Dashboard : Form
         Add(Button("Esporta profilo", ExportProfile), 175, 392, 140, 34);
         Add(Button("Libreria giochi", ShowGameLibrary), 326, 392, 145, 34);
         Add(Button("Azioni Boost", ShowBoostActions), 482, 392, 192, 34);
-        Add(status, 24, 506, 650, 62);
+        Add(Button("Avvio automatico", ShowAutomaticGames), 24, 494, 158, 34);
+        Add(status, 24, 550, 650, 62);
         profile.SelectedIndexChanged += delegate { SavePreferences(); };
         allow.CheckedChanged += delegate { SavePreferences(); };
         gameLabel.Text = "Gioco non configurato";
         status.Text = "Scegli un gioco e avvia un'app secondaria da questa finestra.";
-        if (action.Pending || power.Pending || windowAction.Pending) Recover("Intervento precedente ripristinato.");
+        bool recovering = action.Pending || power.Pending || windowAction.Pending;
+        if (recovering) Recover("Intervento precedente ripristinato.");
+        try
+        {
+            automatic = AutomaticGames.Read(AutomaticPath);
+            if (recovering && automatic.Enabled)
+            {
+                automatic = new AutomaticGames(false, automatic.Paths);
+                status.Text = "Avvio automatico sospeso dopo il recupero. Riattivalo dalla lista quando vuoi.";
+            }
+        }
+        catch (Exception error) { status.Text = "Avvio automatico disattivato: " + error.Message; }
         timer.Interval = 3000;
         timer.Tick += delegate { Sample(); };
         Shown += delegate { Sample(); timer.Start(); ScanMachine(); };
@@ -1057,7 +1070,7 @@ internal sealed class Dashboard : Form
 
     private GamePreferences CurrentPreferences()
     {
-        return new GamePreferences(profile.SelectedIndex, allow.Checked);
+        return new GamePreferences(profile.SelectedIndex, allow.Checked, allowPower, allowWindow);
     }
 
     private void SetPreferences(GamePreferences preferences)
@@ -1067,6 +1080,8 @@ internal sealed class Dashboard : Form
         {
             profile.SelectedIndex = preferences.Level;
             allow.Checked = preferences.LowerPriority;
+            allowPower = preferences.HighPerformance;
+            allowWindow = preferences.Minimize;
         }
         finally { loadingPreferences = false; }
     }
@@ -1210,6 +1225,7 @@ internal sealed class Dashboard : Form
             powerOption.CheckedChanged += delegate
             {
                 allowPower = powerOption.Checked;
+                SavePreferences();
                 if (!allowPower && power.Pending)
                 {
                     try { power.Restore(); }
@@ -1220,6 +1236,7 @@ internal sealed class Dashboard : Form
             windowOption.CheckedChanged += delegate
             {
                 allowWindow = windowOption.Checked;
+                SavePreferences();
                 if (!allowWindow && windowAction.Pending)
                 {
                     try { windowAction.Restore(); }
@@ -1290,6 +1307,87 @@ internal sealed class Dashboard : Form
             dialog.Controls.Add(windowOption);
             dialog.Controls.Add(powerOption);
             dialog.Controls.Add(actionOption);
+            dialog.ShowDialog(this);
+        }
+    }
+
+    private string AutomaticPath { get { return Path.Combine(action.StateFolder, "automatic.games"); } }
+
+    private void ShowAutomaticGames(object sender, EventArgs args)
+    {
+        using (var dialog = new Form { Text = "Avvio automatico del boost", Size = new Size(780, 520), StartPosition = FormStartPosition.CenterParent })
+        using (var list = new ListView { Dock = DockStyle.Fill, View = View.Details, CheckBoxes = true, FullRowSelect = true })
+        using (var master = new CheckBox { Text = "Attiva il boost quando rileva uno degli eseguibili spuntati", Dock = DockStyle.Top, Height = 42 })
+        using (var hint = new Label { Text = "L'ottimizzatore deve restare aperto. Ogni voce usa il suo profilo.", Dock = DockStyle.Top, Height = 25 })
+        using (var controls = new Panel { Dock = DockStyle.Bottom, Height = 43 })
+        using (var more = new Button { Text = "Aggiungi eseguibile", Dock = DockStyle.Left, Width = 155 })
+        using (var save = new Button { Text = "Salva", Dock = DockStyle.Right, Width = 105 })
+        using (var cancel = new Button { Text = "Annulla", Dock = DockStyle.Right, Width = 105, DialogResult = DialogResult.Cancel })
+        {
+            master.Checked = automatic.Enabled;
+            list.Columns.Add("Programma", 240);
+            list.Columns.Add("File eseguibile", 500);
+            var rows = new System.Collections.Generic.Dictionary<string, ListViewItem>(StringComparer.OrdinalIgnoreCase);
+            Action<string, string, bool> add = delegate(string name, string path, bool enabledForGame)
+            {
+                if (String.IsNullOrEmpty(path) || ExecutableIdentity.Matches(path, Application.ExecutablePath)) return;
+                ListViewItem row;
+                if (rows.TryGetValue(path, out row))
+                {
+                    if (enabledForGame) row.Checked = true;
+                    return;
+                }
+                try { new AutomaticGames(false, new[] { path }); }
+                catch (ArgumentException) { return; }
+                catch (InvalidDataException) { return; }
+                row = new ListViewItem(new[] { name, path }) { Tag = path, Checked = enabledForGame };
+                rows.Add(path, row);
+                list.Items.Add(row);
+            };
+            if (scanned != null)
+            {
+                foreach (GameEntry item in scanned.Games) add(item.Name, item.Executable, false);
+                foreach (GameEntry item in scanned.Installed) add(item.Name, item.Executable, false);
+            }
+            foreach (string path in automatic.Paths) add(Path.GetFileName(path), path, true);
+            list.Sorting = SortOrder.Ascending;
+            more.Click += delegate
+            {
+                string path = SelectCatalogExecutable("Aggiungi all'avvio automatico", false);
+                if (path == null) return;
+                add(Path.GetFileName(path), path, true);
+                if (!rows.ContainsKey(path)) MessageBox.Show(dialog, "Questo eseguibile non può essere usato come avvio automatico.");
+            };
+            save.Click += delegate
+            {
+                try
+                {
+                    var selected = new System.Collections.Generic.List<string>();
+                    foreach (ListViewItem row in list.CheckedItems) selected.Add((string)row.Tag);
+                    var next = new AutomaticGames(master.Checked, selected);
+                    if (next.Enabled && next.Paths.Count == 0) throw new InvalidDataException("Spunta almeno un programma.");
+                    if (automaticSession && (!next.Enabled || !next.Paths.Exists(path =>
+                        String.Equals(path, gamePath, StringComparison.OrdinalIgnoreCase))))
+                    {
+                        DeactivateBoost(this, EventArgs.Empty);
+                        if (action.Pending || power.Pending || windowAction.Pending) return;
+                    }
+                    next.Save(AutomaticPath);
+                    automatic = next;
+                    status.Text = next.Enabled ? "Avvio automatico pronto per " + next.Paths.Count + " programmi." : "Avvio automatico disattivato.";
+                    dialog.DialogResult = DialogResult.OK;
+                }
+                catch (Exception error) { MessageBox.Show(dialog, error.Message); }
+            };
+            controls.Controls.Add(more);
+            controls.Controls.Add(cancel);
+            controls.Controls.Add(save);
+            dialog.Controls.Add(list);
+            dialog.Controls.Add(controls);
+            dialog.Controls.Add(hint);
+            dialog.Controls.Add(master);
+            dialog.AcceptButton = save;
+            dialog.CancelButton = cancel;
             dialog.ShowDialog(this);
         }
     }
@@ -1378,6 +1476,7 @@ internal sealed class Dashboard : Form
         if (game != null) { game.Dispose(); game = null; }
         if (gameTree != null) { gameTree.Dispose(); gameTree = null; }
         enabled.Checked = false;
+        automaticSession = false;
         waitingAfterRestore = false;
         gamePath = selected;
         LoadPreferences();
@@ -1548,6 +1647,8 @@ internal sealed class Dashboard : Form
 
             if (game != null && !(gameTree == null ? !game.HasExited : gameTree.Update(game)))
             {
+                if (automaticSession) enabled.Checked = false;
+                automaticSession = false;
                 game.Dispose();
                 game = null;
                 if (gameTree != null) { gameTree.Dispose(); gameTree = null; }
@@ -1560,7 +1661,26 @@ internal sealed class Dashboard : Form
             }
             if (game == null)
             {
-                game = Optimizer.FindGame(gamePath);
+                string detectedPath;
+                game = automatic.Detect(out detectedPath);
+                if (game != null && optional != null && !optional.HasExited &&
+                    ExecutableIdentity.Matches(detectedPath, optional.MainModule.FileName))
+                {
+                    game.Dispose();
+                    game = null;
+                    detectedPath = null;
+                }
+                if (game != null)
+                {
+                    if (!Recover("Stato originale ripristinato.")) { game.Dispose(); game = null; return; }
+                    gamePath = detectedPath;
+                    LoadPreferences();
+                    waitingAfterRestore = false;
+                    automaticSession = true;
+                    enabled.Checked = true;
+                    status.Text = "Boost automatico: " + Path.GetFileName(gamePath);
+                }
+                else game = Optimizer.FindGame(gamePath);
                 if (game != null)
                 {
                     try { gameTree = new GameTree(game); gameTree.Update(game); }
@@ -1569,7 +1689,8 @@ internal sealed class Dashboard : Form
                 }
             }
             timer.Interval = game == null ? 3000 : 1000;
-            if (gamePath != null) gameLabel.Text = (game == null ? "In attesa di " : "Gioco attivo: ") + Path.GetFileName(gamePath);
+            if (gamePath != null) gameLabel.Text = (game == null ? "In attesa di " : automaticSession ? "Sessione automatica: " : "Gioco attivo: ") +
+                Path.GetFileName(gamePath);
 
             bool sessionReady = game != null && enabled.Checked && !waitingAfterRestore;
             if (!sessionReady) { Recover("Stato originale ripristinato."); return; }
