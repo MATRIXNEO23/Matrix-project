@@ -1050,6 +1050,7 @@ internal sealed class Dashboard : Form
     private string batchSkipped;
     private int boostServices;
     private bool searchTried;
+    private bool ManualBoost { get { return enabled.Checked && !automaticSession && !waitingAfterRestore; } }
     private const int BoostHotkeyId = 1;
     private const int HotkeyMessage = 0x0312;
 
@@ -1201,7 +1202,7 @@ internal sealed class Dashboard : Form
         bool active = enabled.Checked && !waitingAfterRestore;
         boostButton.Text = active ? "Disattiva e ripristina" : "Attiva Boost";
         boostButton.BackColor = active ? Color.FromArgb(64, 71, 89) : Color.FromArgb(26, 105, 96);
-        boostState.Text = !active ? "Boost spento" : game == null ? "Boost pronto · avvia il gioco" :
+        boostState.Text = !active ? "Boost spento" : ManualBoost ? "Boost manuale attivo" : game == null ? "Boost pronto · avvia il gioco" :
             profile.SelectedIndex == 0 ? "Anteprima attiva · nessuna azione applicata" : "Boost attivo";
         boostState.ForeColor = active ? Color.FromArgb(115, 217, 188) : Color.FromArgb(174, 188, 203);
         var chosen = new System.Collections.Generic.List<string>();
@@ -1216,7 +1217,7 @@ internal sealed class Dashboard : Form
         if (gamePath != null && boostApps.TryGetValue(gamePath, out selected) && selected.Count > 0)
             chosen.Add(selected.Count + " app da chiudere");
         if (boostServices != 0) chosen.Add("servizi selezionati");
-        actionSummary.Text = profile.SelectedIndex == 0 ? "Conservativo · solo anteprima" :
+        actionSummary.Text = profile.SelectedIndex == 0 && !ManualBoost && chosen.Count == 0 ? "Conservativo · solo anteprima" :
             chosen.Count == 0 ? "Nessuna azione automatica selezionata" : String.Join(", ", chosen.ToArray());
         if (profile.SelectedIndex != 0 && (allow.Checked || allowWindow || relaunchGame != null) &&
             (optional == null || optional.HasExited) && !relaunch.Pending)
@@ -1301,8 +1302,15 @@ internal sealed class Dashboard : Form
 
     private void ActivateBoost(object sender, EventArgs args)
     {
-        if (gamePath == null) { status.Text = "Scegli prima il gioco."; return; }
+        List<string> selected;
+        if (boostServices == 0 && (!boostApps.TryGetValue(gamePath ?? "", out selected) || selected.Count == 0) &&
+            relaunchGame == null && (profile.SelectedIndex == 0 || (!allow.Checked && !allowPower && !allowWindow)))
+        {
+            status.Text = "Nessuna azione selezionata. Apri Configura azioni per spuntare app o servizi.";
+            return;
+        }
         if (!Recover("Ripristino precedente verificato.")) return;
+        automaticSession = false;
         waitingAfterRestore = false;
         powerTried = false;
         windowTried = false;
@@ -1311,7 +1319,8 @@ internal sealed class Dashboard : Form
         boostAppsTried = false;
         searchTried = false;
         enabled.Checked = true;
-        status.Text = "Boost attivo. Si applicano il profilo e le autorizzazioni correnti.";
+        status.Text = "Boost manuale attivo. Applico le azioni selezionate.";
+        Sample();
     }
 
     private void DeactivateBoost(object sender, EventArgs args)
@@ -1527,7 +1536,7 @@ internal sealed class Dashboard : Form
 
     private void StartSearchBoost(int selection, bool configured)
     {
-        if (game == null || game.HasExited || !enabled.Checked || profile.SelectedIndex == 0 || waitingAfterRestore)
+        if (!ManualBoost && (game == null || game.HasExited || !enabled.Checked || profile.SelectedIndex == 0 || waitingAfterRestore))
         {
             MessageBox.Show(this, "Avvia il gioco e attiva il boost con un profilo operativo.", "Windows Search");
             return;
@@ -1541,7 +1550,8 @@ internal sealed class Dashboard : Form
             if (serviceStop != null) serviceStop.Dispose();
             string token = Guid.NewGuid().ToString("N");
             serviceStop = ServiceBoost.CreateStopSignal(token);
-            using (var owner = Process.GetCurrentProcess()) serviceWorker = ServiceBoost.RunElevated(owner, game, token, selection);
+            using (var owner = Process.GetCurrentProcess())
+                serviceWorker = ServiceBoost.RunElevated(owner, ManualBoost ? owner : game, token, selection);
         }
         catch (Exception error) { status.Text = "Windows Search: " + error.Message; }
     }
@@ -1944,13 +1954,13 @@ internal sealed class Dashboard : Form
 
     private void ShowBoostApps(object sender, EventArgs args)
     {
-        if (gamePath == null || enabled.Checked)
+        if (enabled.Checked)
         {
-            MessageBox.Show(this, "Scegli il gioco e spegni il boost prima di cambiare le app.");
+            MessageBox.Show(this, "Spegni il boost prima di cambiare le app.");
             return;
         }
         List<string> selected;
-        if (!boostApps.TryGetValue(gamePath, out selected)) selected = new List<string>();
+        if (!boostApps.TryGetValue(gamePath ?? "", out selected)) selected = new List<string>();
         var paths = RunningSecondaryApps().Select(app => app.Executable).Concat(selected)
             .Distinct(StringComparer.OrdinalIgnoreCase).Where(file => IsSecondaryPath(file) && RelaunchAction.Eligible(file, false))
             .OrderBy(Path.GetFileName).ToList();
@@ -1964,16 +1974,16 @@ internal sealed class Dashboard : Form
             dialog.Controls.Add(note);
             dialog.Controls.Add(save);
             if (dialog.ShowDialog(this) == DialogResult.OK)
-                boostApps[gamePath] = apps.CheckedItems.Cast<string>().ToList();
+                boostApps[gamePath ?? ""] = apps.CheckedItems.Cast<string>().ToList();
         }
     }
 
     private void CloseBoostApps(Telemetry before)
     {
-        if (boostAppsTried || profile.SelectedIndex == 0) return;
+        if (boostAppsTried || (profile.SelectedIndex == 0 && !ManualBoost)) return;
         boostAppsTried = true;
         List<string> selected;
-        if (!boostApps.TryGetValue(gamePath, out selected) || selected.Count == 0) return;
+        if (!boostApps.TryGetValue(gamePath ?? "", out selected) || selected.Count == 0) return;
         EnsureWatcher();
         if (watcher == null || watcher.HasExited) throw new IOException("Monitor di ripristino non disponibile.");
         batchRamBefore = before.Available;
@@ -2238,7 +2248,7 @@ internal sealed class Dashboard : Form
             if (game != null && !(gameTree == null ? !game.HasExited : gameTree.Update(game)))
             {
                 StopManagedService();
-                if (automaticSession) enabled.Checked = false;
+                enabled.Checked = false;
                 automaticSession = false;
                 game.Dispose();
                 game = null;
@@ -2256,8 +2266,8 @@ internal sealed class Dashboard : Form
             }
             if (game == null)
             {
-                string detectedPath;
-                game = automatic.Detect(out detectedPath);
+                string detectedPath = null;
+                if (!ManualBoost) game = automatic.Detect(out detectedPath);
                 if (game != null && optional != null && !optional.HasExited &&
                     ExecutableIdentity.Matches(detectedPath, optional.MainModule.FileName))
                 {
@@ -2289,8 +2299,8 @@ internal sealed class Dashboard : Form
 
             FindExistingSecondary();
             RefreshPrimaryControls();
-            bool sessionReady = game != null && enabled.Checked && !waitingAfterRestore;
-            if (!sessionReady || profile.SelectedIndex == 0) StopManagedService();
+            bool sessionReady = ManualBoost || (game != null && enabled.Checked && !waitingAfterRestore);
+            if (!sessionReady || (profile.SelectedIndex == 0 && !ManualBoost)) StopManagedService();
             if (!sessionReady) { Recover("Stato originale ripristinato."); return; }
             bool requestedRelaunch = relaunchGame != null && String.Equals(gamePath, relaunchGame, StringComparison.OrdinalIgnoreCase) &&
                 profile.SelectedIndex != 0;
@@ -2308,7 +2318,7 @@ internal sealed class Dashboard : Form
             }
             CloseBoostApps(now);
             ShowClosureResults(now);
-            if (boostServices != 0 && !searchTried && profile.SelectedIndex != 0 &&
+            if (boostServices != 0 && !searchTried && (profile.SelectedIndex != 0 || ManualBoost) &&
                 (serviceWorker == null || serviceWorker.HasExited))
             {
                 searchTried = true;
@@ -2358,7 +2368,7 @@ internal sealed class Dashboard : Form
             }
             if (profile.SelectedIndex == 0)
             {
-                if (!Recover("Priorità ripristinata.")) return;
+                if (action.Pending) action.Restore();
                 status.Text = "Conservativo: simulazione. Ridurrebbe la priorità dell'app secondaria.";
                 return;
             }
