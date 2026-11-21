@@ -328,6 +328,7 @@ internal sealed class Dashboard : Form
     private bool waitingAfterRestore;
     private int busySamples;
     private Telemetry beforeAction;
+    private readonly Stopwatch actionTime = new Stopwatch();
 
     public Dashboard(PriorityAction action)
     {
@@ -526,6 +527,7 @@ internal sealed class Dashboard : Form
         try
         {
             action.Restore();
+            actionTime.Reset();
             status.Text = message;
             if (beforeAction != null)
             {
@@ -591,8 +593,17 @@ internal sealed class Dashboard : Form
                 watcher = Optimizer.StartWatcher();
                 if (watcher == null || watcher.HasExited) throw new InvalidOperationException("Ripristino automatico non disponibile.");
             }
-            if (action.Pending) return;
+            if (action.Pending)
+            {
+                if (actionTime.Elapsed.TotalSeconds >= 15)
+                {
+                    waitingAfterRestore = true;
+                    Recover("Intervento concluso dopo 15 secondi. Priorità ripristinata.");
+                }
+                return;
+            }
             action.Apply(optional);
+            if (action.Pending) actionTime.Restart();
             beforeAction = action.Pending ? now : null;
             status.Text = action.Pending ? "App secondaria a priorità inferiore. Ripristino alla fine del gioco." :
                 "Priorità lasciata invariata: l'app secondaria non è a priorità normale.";
