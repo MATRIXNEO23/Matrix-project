@@ -987,6 +987,8 @@ internal sealed class Dashboard : Form
     private readonly IoCounters io = new IoCounters();
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     private readonly Label metrics = new Label(), status = new Label(), gameLabel = new Label();
+    private readonly Label actionSummary = new Label(), boostState = new Label();
+    private readonly Button boostButton;
     private readonly CheckBox enabled = new CheckBox(), allow = new CheckBox(), shortcut = new CheckBox();
     private bool shortcutRegistered;
     private readonly ComboBox profile = new ComboBox();
@@ -1016,36 +1018,45 @@ internal sealed class Dashboard : Form
         windowAction = new WindowAction(action.StateFolder);
         relaunch = new RelaunchAction(action.StateFolder);
         Text = "Windows Smart Optimizer";
-        ClientSize = new Size(700, 632);
-        MinimumSize = new Size(710, 672);
-        BackColor = Color.FromArgb(23, 27, 35);
-        ForeColor = Color.FromArgb(233, 237, 245);
+        ClientSize = new Size(720, 448);
+        MinimumSize = new Size(736, 488);
+        BackColor = Color.FromArgb(21, 26, 34);
+        ForeColor = Color.FromArgb(235, 240, 247);
         Font = new Font("Segoe UI", 10);
         StartPosition = FormStartPosition.CenterScreen;
 
-        var title = new Label { Text = "Windows Smart Optimizer", Font = new Font("Segoe UI", 20, FontStyle.Bold) };
-        Add(title, 24, 20, 650, 42);
-        Add(metrics, 24, 80, 650, 60);
-        Add(trend, 24, 144, 650, 24);
-        Add(gameLabel, 24, 177, 650, 28);
-        Add(Button("Scegli gioco", ChooseGame), 24, 212, 140, 34);
-        Add(Button("Avvia app secondaria", StartOptional), 175, 212, 190, 34);
-        Add(Button("Ripristina", Restore), 377, 212, 125, 34);
-        Add(Button("Processi e servizi", Inventory), 514, 212, 160, 34);
+        var title = new Label { Text = "Windows Smart Optimizer", Font = new Font("Segoe UI", 19, FontStyle.Bold) };
+        Add(title, 24, 17, 515, 42);
+        Add(Button("Strumenti", ShowTools), 574, 21, 122, 34);
+        Add(SmallLabel("Gioco e avvio"), 24, 75, 250, 20);
+        Add(gameLabel, 24, 100, 403, 27);
+        Add(Button("Scegli gioco", ChooseGame), 439, 97, 116, 34);
+        Add(Button("Avvio automatico", ShowAutomaticGames), 565, 97, 131, 34);
+
+        Add(SmallLabel("Profilo e azioni"), 24, 152, 250, 20);
         profile.DropDownStyle = ComboBoxStyle.DropDownList;
         profile.Items.AddRange(new object[] { "Conservativo", "Bilanciato", "Aggressivo" });
         profile.SelectedIndex = 0;
-        Add(profile, 24, 262, 145, 28);
-        enabled.Text = "Game Booster attivo";
-        Add(enabled, 184, 262, 195, 28);
-        allow.Text = "Riduci priorità app secondaria";
-        Add(allow, 382, 262, 290, 28);
-        shortcut.Text = "Usa Ctrl+Alt+F10 per attivare o disattivare il boost";
-        Add(shortcut, 24, 300, 650, 28);
+        Add(profile, 24, 176, 148, 28);
+        Add(actionSummary, 188, 177, 365, 39);
+        Add(Button("Configura azioni", ShowBoostActions), 565, 175, 131, 34);
+
+        Add(boostState, 24, 232, 670, 22);
+        boostButton = Button("Attiva Boost", ToggleBoost);
+        boostButton.BackColor = Color.FromArgb(26, 105, 96);
+        boostButton.Font = new Font("Segoe UI", 15, FontStyle.Bold);
+        Add(boostButton, 24, 259, 672, 51);
+        Add(status, 24, 319, 672, 42);
+        Add(metrics, 24, 365, 672, 57);
+        Add(trend, 24, 427, 672, 10);
+        metrics.ForeColor = Color.FromArgb(182, 197, 214);
+        status.ForeColor = Color.FromArgb(208, 220, 233);
+
         shortcut.CheckedChanged += delegate { UpdateShortcut(); };
         enabled.CheckedChanged += delegate
         {
             if (!enabled.Checked) { StopManagedService(); Recover("Boost spento. Stato originale ripristinato."); }
+            RefreshPrimaryControls();
         };
         allow.CheckedChanged += delegate
         {
@@ -1055,25 +1066,10 @@ internal sealed class Dashboard : Form
                 catch (Exception error) { status.Text = "Ripristino priorità in attesa: " + error.Message; }
             }
         };
-        var activate = Button("Attiva Boost", ActivateBoost);
-        activate.BackColor = Color.FromArgb(23, 114, 102);
-        activate.Font = new Font("Segoe UI", 13, FontStyle.Bold);
-        Add(activate, 24, 342, 316, 48);
-        Add(Button("Disattiva e ripristina", DeactivateBoost), 352, 342, 322, 48);
-        Add(Button("Analisi del PC", ShowInventory), 24, 450, 140, 34);
-        Add(Button("Ripristino d'emergenza", Restore), 178, 450, 166, 34);
-        Add(Button("Profilo di questo PC", ApplyPcProfile), 356, 450, 166, 34);
-        Add(Button("Modalità Esperto", ShowExpert), 534, 450, 140, 34);
-        Add(Button("Importa profilo", ImportProfile), 24, 392, 140, 34);
-        Add(Button("Esporta profilo", ExportProfile), 175, 392, 140, 34);
-        Add(Button("Libreria giochi", ShowGameLibrary), 326, 392, 145, 34);
-        Add(Button("Azioni Boost", ShowBoostActions), 482, 392, 192, 34);
-        Add(Button("Avvio automatico", ShowAutomaticGames), 24, 494, 158, 34);
-        Add(status, 24, 550, 650, 62);
-        profile.SelectedIndexChanged += delegate { SavePreferences(); };
-        allow.CheckedChanged += delegate { SavePreferences(); };
+        profile.SelectedIndexChanged += delegate { SavePreferences(); RefreshPrimaryControls(); };
+        allow.CheckedChanged += delegate { SavePreferences(); RefreshPrimaryControls(); };
         gameLabel.Text = "Gioco non configurato";
-        status.Text = "Scegli un gioco e avvia un'app secondaria da questa finestra.";
+        status.Text = "Scegli un gioco e configura le azioni da applicare.";
         bool recovering = action.Pending || power.Pending || windowAction.Pending || relaunch.Pending;
         if (recovering) Recover("Intervento precedente ripristinato.");
         try
@@ -1088,6 +1084,7 @@ internal sealed class Dashboard : Form
         catch (Exception error) { status.Text = "Avvio automatico disattivato: " + error.Message; }
         timer.Interval = 3000;
         timer.Tick += delegate { Sample(); };
+        RefreshPrimaryControls();
         Shown += delegate { Sample(); timer.Start(); ScanMachine(); };
         FormClosing += delegate {
             timer.Stop();
@@ -1098,11 +1095,82 @@ internal sealed class Dashboard : Form
         FormClosed += delegate {
             timer.Dispose();
             io.Dispose();
+            enabled.Dispose(); allow.Dispose(); shortcut.Dispose();
             if (optional != null) optional.Dispose();
             if (game != null) game.Dispose();
             if (gameTree != null) gameTree.Dispose();
             if (watcher != null) watcher.Dispose();
         };
+    }
+
+    private static Label SmallLabel(string text)
+    {
+        return new Label { Text = text, ForeColor = Color.FromArgb(151, 201, 196), Font = new Font("Segoe UI", 10, FontStyle.Bold) };
+    }
+
+    private void ToggleBoost(object sender, EventArgs args)
+    {
+        if (enabled.Checked && !waitingAfterRestore) DeactivateBoost(sender, args);
+        else ActivateBoost(sender, args);
+        RefreshPrimaryControls();
+    }
+
+    private void RefreshPrimaryControls()
+    {
+        bool active = enabled.Checked && !waitingAfterRestore;
+        boostButton.Text = active ? "Disattiva e ripristina" : "Attiva Boost";
+        boostButton.BackColor = active ? Color.FromArgb(64, 71, 89) : Color.FromArgb(26, 105, 96);
+        boostState.Text = !active ? "Boost spento" : game == null ? "Boost pronto · avvia il gioco" :
+            profile.SelectedIndex == 0 ? "Anteprima attiva · nessuna azione applicata" : "Boost attivo";
+        boostState.ForeColor = active ? Color.FromArgb(115, 217, 188) : Color.FromArgb(174, 188, 203);
+        var chosen = new System.Collections.Generic.List<string>();
+        if (relaunchGame != null) chosen.Add("riapertura app");
+        else
+        {
+            if (allow.Checked) chosen.Add("priorità");
+            if (allowWindow) chosen.Add("minimizzazione");
+        }
+        if (allowPower) chosen.Add("energia");
+        actionSummary.Text = profile.SelectedIndex == 0 ? "Conservativo · solo anteprima" :
+            chosen.Count == 0 ? "Nessuna azione automatica selezionata" : String.Join(", ", chosen.ToArray());
+        actionSummary.ForeColor = Color.FromArgb(190, 204, 220);
+    }
+
+    private void ShowTools(object sender, EventArgs args)
+    {
+        using (var dialog = new Form { Text = "Strumenti", Size = new Size(560, 412), StartPosition = FormStartPosition.CenterParent })
+        using (var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), AutoScroll = true })
+        using (var hotkey = new CheckBox { Text = "Ctrl+Alt+F10 attiva o disattiva il boost", Width = 460, Height = 32 })
+        {
+            dialog.BackColor = BackColor;
+            dialog.ForeColor = ForeColor;
+            hotkey.ForeColor = ForeColor;
+            hotkey.Checked = shortcut.Checked;
+            hotkey.CheckedChanged += delegate
+            {
+                shortcut.Checked = hotkey.Checked;
+                if (hotkey.Checked != shortcut.Checked) hotkey.Checked = shortcut.Checked;
+            };
+            var entries = new[] {
+                Button("Analisi del PC", ShowInventory),
+                Button("Processi e servizi", Inventory),
+                Button("Modalità Esperto", ShowExpert),
+                Button("Profilo di questo PC", ApplyPcProfile),
+                Button("Libreria giochi", ShowGameLibrary),
+                Button("Importa profilo", ImportProfile),
+                Button("Esporta profilo", ExportProfile),
+                Button("Ripristino d'emergenza", Restore)
+            };
+            foreach (Button entry in entries)
+            {
+                entry.Size = new Size(233, 43);
+                entry.ForeColor = ForeColor;
+                flow.Controls.Add(entry);
+            }
+            flow.Controls.Add(hotkey);
+            dialog.Controls.Add(flow);
+            dialog.ShowDialog(this);
+        }
     }
 
     private void ApplyPcProfile(object sender, EventArgs args)
@@ -1372,6 +1440,7 @@ internal sealed class Dashboard : Form
         using (var actionOption = new CheckBox { Text = "Consenti riduzione temporanea della priorità", Dock = DockStyle.Top, Height = 33 })
         using (var demo = new Button { Text = "Apri finestra di prova", Dock = DockStyle.Bottom, Height = 35 })
         using (var services = new Panel { Dock = DockStyle.Bottom, Height = 37 })
+        using (var chooseOptional = new Button { Text = "Avvia app secondaria", Width = 186, Dock = DockStyle.Fill })
         using (var searchPause = new Button { Text = "Pausa Windows Search", Width = 205, Dock = DockStyle.Left })
         using (var searchRestore = new Button { Text = "Ripristina servizio", Width = 172, Dock = DockStyle.Right })
         {
@@ -1426,8 +1495,10 @@ internal sealed class Dashboard : Form
             details.Items.Add(restartRow);
             var searchRow = new ListViewItem(new[] { "Servizi Windows", "Pausa indicizzazione Windows Search", "Facoltativa" });
             details.Items.Add(searchRow);
+            services.Controls.Add(chooseOptional);
             services.Controls.Add(searchPause);
             services.Controls.Add(searchRestore);
+            chooseOptional.Click += delegate { StartOptional(sender, args); };
             searchPause.Click += delegate { StartSearchBoost(); };
             searchRestore.Click += delegate
             {
@@ -1523,6 +1594,7 @@ internal sealed class Dashboard : Form
             dialog.Controls.Add(powerOption);
             dialog.Controls.Add(actionOption);
             dialog.ShowDialog(this);
+            RefreshPrimaryControls();
         }
     }
 
@@ -1949,6 +2021,7 @@ internal sealed class Dashboard : Form
             if (gamePath != null) gameLabel.Text = (game == null ? "In attesa di " : automaticSession ? "Sessione automatica: " : "Gioco attivo: ") +
                 Path.GetFileName(gamePath);
 
+            RefreshPrimaryControls();
             bool sessionReady = game != null && enabled.Checked && !waitingAfterRestore;
             if (!sessionReady || profile.SelectedIndex == 0) StopManagedService();
             if (!sessionReady) { Recover("Stato originale ripristinato."); return; }
