@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
@@ -769,8 +771,29 @@ internal sealed class WindowAction
 internal sealed class RelaunchAction
 {
     private readonly string journal;
-    public RelaunchAction(string folder) { journal = Path.Combine(folder, "relaunch.pending"); }
-    public bool Pending { get { return File.Exists(journal); } }
+    private readonly bool group;
+    public RelaunchAction(string folder) : this(Path.Combine(folder, "relaunch.pending"), true) { }
+
+    private RelaunchAction(string journal, bool group)
+    {
+        this.journal = journal;
+        this.group = group;
+    }
+
+    private string[] BatchJournals()
+    {
+        string folder = Path.GetDirectoryName(journal);
+        return group && Directory.Exists(folder) ?
+            Directory.GetFiles(folder, "relaunch-*.pending") : new string[0];
+    }
+
+    public bool Pending { get { return File.Exists(journal) || BatchJournals().Length > 0; } }
+
+    public bool ApplyOne(Process process)
+    {
+        string path = Path.Combine(Path.GetDirectoryName(journal), "relaunch-" + Guid.NewGuid().ToString("N") + ".pending");
+        return new RelaunchAction(path, false).Apply(process, false);
+    }
 
     private void Locked(Action operation)
     {
@@ -839,6 +862,19 @@ internal sealed class RelaunchAction
     }
 
     public bool Restore()
+    {
+        bool opened = false;
+        var failures = new List<Exception>();
+        foreach (string path in new[] { journal }.Concat(BatchJournals()))
+        {
+            try { opened |= new RelaunchAction(path, false).RestoreOne(); }
+            catch (Exception error) { failures.Add(error); }
+        }
+        if (failures.Count > 0) throw new IOException("Riapertura incompleta. " + failures[0].Message, failures[0]);
+        return opened;
+    }
+
+    private bool RestoreOne()
     {
         bool relaunched = false;
         Locked(delegate
@@ -971,6 +1007,9 @@ internal sealed class IoCounters : IDisposable
 
 internal sealed class Dashboard : Form
 {
+    private readonly Dictionary<string, List<string>> boostApps =
+        new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+    private bool boostAppsTried;
     private const int BoostHotkeyId = 1;
     private const int HotkeyMessage = 0x0312;
 
@@ -1208,6 +1247,7 @@ internal sealed class Dashboard : Form
         windowTried = false;
         priorityTried = false;
         relaunchTried = false;
+        boostAppsTried = false;
         enabled.Checked = true;
         status.Text = "Boost attivo. Si applicano il profilo e le autorizzazioni correnti.";
     }
@@ -1217,8 +1257,10 @@ internal sealed class Dashboard : Form
         StopManagedService();
         waitingAfterRestore = true;
         enabled.Checked = false;
-        Recover("Boost spento. Priorità ripristinata.");
-        if (!action.Pending && beforeAction == null) status.Text = "Boost spento.";
+        if (!action.Pending && !power.Pending && !windowAction.Pending && !relaunch.Pending)
+            status.Text = "Boost spento.";
+        else
+            Recover("Boost spento. Stato originale ripristinato.");
     }
 
     private void ScanMachine()
@@ -1455,9 +1497,12 @@ internal sealed class Dashboard : Form
         using (var demo = new Button { Text = "Apri finestra di prova", Dock = DockStyle.Bottom, Height = 35 })
         using (var services = new Panel { Dock = DockStyle.Bottom, Height = 37 })
         using (var chooseOptional = new Button { Text = "Scegli app secondaria", Width = 186, Dock = DockStyle.Fill })
+        using (var chooseBatch = new Button { Text = "App da chiudere e riaprire", Dock = DockStyle.Top, Height = 35 })
         using (var searchPause = new Button { Text = "Pausa Windows Search", Width = 205, Dock = DockStyle.Left })
         using (var searchRestore = new Button { Text = "Ripristina servizio", Width = 172, Dock = DockStyle.Right })
         {
+            chooseBatch.Click += ShowBoostApps;
+            dialog.Controls.Add(chooseBatch);
             actionOption.Checked = allow.Checked;
             actionOption.CheckedChanged += delegate { allow.Checked = actionOption.Checked; };
             powerOption.Checked = allowPower;
@@ -1828,6 +1873,56 @@ internal sealed class Dashboard : Form
             (gamePath == null || !ExecutableIdentity.Matches(file, gamePath));
     }
 
+    private void ShowBoostApps(object sender, EventArgs args)
+    {
+        if (gamePath == null || enabled.Checked)
+        {
+            MessageBox.Show(this, "Scegli il gioco e spegni il boost prima di cambiare le app.");
+            return;
+        }
+        List<string> selected;
+        if (!boostApps.TryGetValue(gamePath, out selected)) selected = new List<string>();
+        var paths = RunningSecondaryApps().Select(app => app.Executable).Concat(selected)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Where(file => IsSecondaryPath(file) && RelaunchAction.Eligible(file, false))
+            .OrderBy(Path.GetFileName).ToList();
+        using (var dialog = new Form { Text = "App da chiudere e riaprire", Size = new Size(730, 480), StartPosition = FormStartPosition.CenterParent })
+        using (var apps = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true, HorizontalScrollbar = true })
+        using (var note = new Label { Dock = DockStyle.Top, Height = 52, Text = "Al boost le app selezionate ricevono una richiesta di chiusura normale. Al ripristino vengono riaperte come nuove istanze. Salva il lavoro prima di attivare il boost." })
+        using (var save = new Button { Text = "Salva selezione per questa sessione", Dock = DockStyle.Bottom, Height = 40, DialogResult = DialogResult.OK })
+        {
+            foreach (string file in paths) apps.Items.Add(file, selected.Contains(file, StringComparer.OrdinalIgnoreCase));
+            dialog.Controls.Add(apps);
+            dialog.Controls.Add(note);
+            dialog.Controls.Add(save);
+            if (dialog.ShowDialog(this) == DialogResult.OK)
+                boostApps[gamePath] = apps.CheckedItems.Cast<string>().ToList();
+        }
+    }
+
+    private void CloseBoostApps()
+    {
+        if (boostAppsTried || profile.SelectedIndex == 0) return;
+        boostAppsTried = true;
+        List<string> selected;
+        if (!boostApps.TryGetValue(gamePath, out selected) || selected.Count == 0) return;
+        EnsureWatcher();
+        if (watcher == null || watcher.HasExited) throw new IOException("Monitor di ripristino non disponibile.");
+        int requested = 0;
+        var skipped = new List<string>();
+        foreach (string file in selected)
+        {
+            try
+            {
+                using (var process = Optimizer.FindGame(file))
+                    if (process != null && IsSecondaryPath(file) && relaunch.ApplyOne(process)) requested++;
+                    else skipped.Add(Path.GetFileName(file));
+            }
+            catch (Exception) { skipped.Add(Path.GetFileName(file)); }
+        }
+        status.Text = "Richieste di chiusura inviate: " + requested;
+        if (skipped.Count > 0) status.Text += " · Saltate: " + String.Join(", ", skipped);
+    }
+
     private System.Collections.Generic.List<GameEntry> RunningSecondaryApps()
     {
         var entries = new System.Collections.Generic.List<GameEntry>();
@@ -2078,6 +2173,7 @@ internal sealed class Dashboard : Form
                 windowTried = false;
                 priorityTried = false;
                 relaunchTried = false;
+                boostAppsTried = false;
                 relaunchGame = null;
                 busySamples = 0;
                 if (!Recover("Gioco terminato. Priorità originale ripristinata.")) return;
@@ -2134,6 +2230,7 @@ internal sealed class Dashboard : Form
                     status.Text = "Chiusura richiesta. L'app sarà riaperta al ripristino se è uscita.";
                 }
             }
+            CloseBoostApps();
             if (relaunch.Pending && ramBeforeClose.HasValue && optional != null && optional.HasExited)
             {
                 status.Text = String.Format("App chiusa. RAM disponibile di sistema: {0} → {1} MiB. Riapertura al ripristino.",
