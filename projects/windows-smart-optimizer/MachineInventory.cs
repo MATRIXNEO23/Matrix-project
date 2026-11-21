@@ -690,6 +690,17 @@ internal static class ExpertSettings
             {
                 object value = key == null ? null : key.GetValue(name);
                 if (value != null) current = Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture);
+                if (name == "NtfsDisableLastAccessUpdate" && value is int)
+                {
+                    uint raw = unchecked((uint)(int)value);
+                    switch (raw & 0x7fffffffu)
+                    {
+                        case 0: current = "Utente · abilitato"; break;
+                        case 1: current = "Utente · disabilitato"; break;
+                        case 2: current = "Sistema · disabilitato"; break;
+                        case 3: current = "Sistema · abilitato"; break;
+                    }
+                }
             }
         }
         catch (UnauthorizedAccessException) { current = "Accesso limitato"; }
