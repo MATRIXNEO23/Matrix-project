@@ -137,3 +137,13 @@ Quando viene rilevato un eseguibile spuntato, la dashboard carica il profilo del
 Verifica con fixture sul PC: programma non spuntato ignorato; programma spuntato riconosciuto con il suo profilo; alla sua uscita, boost spento e priorità della fixture riportata a Normale. Tre test integrati riusciti; dashboard finale aperta, build 96.768 byte, SHA-256 `3A54B7C06C045A8BCA9684C7E683927A2AD57AB42F0FFE25D515DE1FE46E3FDC`.
 
 La finestra Avvio automatico usa ora una lista con caselle sempre visibili accanto al nome e si popola anche se aperta prima che finisca la scansione. Il test UI ha aperto la finestra prima della scansione, selezionato Minecraft e verificato il salvataggio in un profilo temporaneo, senza cambiare le spunte del profilo reale. La build aggiornata è stata riaperta sul PC a funzioni automatiche ancora da configurare. SHA-256 `4D317187732B99ED31DE5AA7F083A4195C946FD1B7CA60AC07545EE63D599985`.
+
+### Chiusura normale e riapertura dell'app secondaria
+
+In Azioni Boost, Chiudi e riapri l'app secondaria in questa sessione autorizza la sola app lanciata dalla dashboard per il gioco selezionato, con conferma che chiede di salvare il lavoro. La spunta è disattivata per impostazione predefinita, vale per la sessione e richiede un profilo operativo. Browser principali, componenti Windows e protezioni sono esclusi. La riapertura è una nuova istanza dello stesso eseguibile, senza ricostruire documenti o finestre interne. L'intervento prevale su minimizzazione e riduzione di priorità per la medesima app.
+
+Prima della richiesta normale di chiusura viene scritto il journal. Se l'app rimane aperta, per esempio perché rifiuta la chiusura, il ripristino la lascia aperta. Se esiste già un'istanza corrispondente nella sessione, non ne lancia un'altra. Alla disattivazione o alla fine del gioco, il booster rilegge il journal e riapre l'app se è uscita. Quando osserva l'uscita, mostra la RAM disponibile di sistema prima/dopo. Tale variazione comprende anche gli altri processi.
+
+Verifica sul PC con una finestra sintetica: chiusura del PID 12488 e riapertura con finestra nel PID 10896, mancata duplicazione di una riapertura manuale e rispetto del rifiuto di chiusura. La RAM disponibile del sistema è passata da 2.988,1 a 3.038,3 MiB nel campione finale. Il flusso della dashboard con gioco di prova è stato collaudato separatamente, compresa la riapertura automatica a fine gioco. Build locale 104.960 byte, SHA-256 `8542FE072CADB22B450580481A15DC9397EB0EE00E245E119476F6041F87105C`.
+
+Il controllo di accesso del gestore servizi ha restituito errore Windows 5 per la registrazione di un servizio di prova. Il ciclo reale dei servizi resta da verificare con privilegi amministrativi. Nessun servizio del PC è stato modificato.
