@@ -19,6 +19,7 @@ internal static class Optimizer
     private static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--test-worker") { Thread.Sleep(60000); return 0; }
+        if (args.Length == 1 && args[0] == "--demo-worker") { DemoWindow(); return 0; }
         if (args.Length == 2 && args[0] == "--test-child-owner")
         {
             using (var child = Process.Start(Application.ExecutablePath, "--test-worker"))
@@ -51,6 +52,22 @@ internal static class Optimizer
             finally { mutex.ReleaseMutex(); }
         }
         return 0;
+    }
+
+    private static void DemoWindow()
+    {
+        Application.EnableVisualStyles();
+        using (var process = Process.GetCurrentProcess())
+        using (var window = new Form { Text = "Carico di prova del booster", Size = new Size(400, 155), StartPosition = FormStartPosition.CenterScreen })
+        using (var label = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter })
+        using (var timer = new System.Windows.Forms.Timer { Interval = 250 })
+        {
+            window.Controls.Add(label);
+            timer.Tick += delegate { process.Refresh(); label.Text = "Priorità Windows: " + process.PriorityClass +
+                "\nQuesta finestra resta aperta durante il ripristino."; };
+            window.Shown += delegate { timer.Start(); };
+            Application.Run(window);
+        }
     }
 
     private static int Watch(int ownerId, long ownerStart, string state, string mutexName)
@@ -658,6 +675,7 @@ internal sealed class Dashboard : Form
         Add(Button("Importa profilo", ImportProfile), 24, 392, 140, 34);
         Add(Button("Esporta profilo", ExportProfile), 175, 392, 140, 34);
         Add(Button("Libreria giochi", ShowGameLibrary), 326, 392, 145, 34);
+        Add(Button("Azioni Boost", ShowBoostActions), 482, 392, 192, 34);
         Add(status, 24, 446, 650, 62);
         profile.SelectedIndexChanged += delegate { SavePreferences(); };
         allow.CheckedChanged += delegate { SavePreferences(); };
@@ -809,23 +827,146 @@ internal sealed class Dashboard : Form
 
     private void ShowGameLibrary(object sender, EventArgs args)
     {
-        if (scanned == null) { status.Text = scanError ?? "Scansione del PC in corso."; return; }
-        if (scanned.Games.Count == 0) { status.Text = "Nessun gioco rilevato. Usa Scegli gioco per aggiungerlo."; return; }
-        using (var dialog = new Form { Text = "Libreria giochi", Size = new Size(560, 410), StartPosition = FormStartPosition.CenterParent })
+        string selected = SelectCatalogExecutable("Libreria giochi", true);
+        if (selected != null) SetGame(selected);
+    }
+
+    private string SelectCatalogExecutable(string heading, bool gamesOnly)
+    {
+        var catalog = new System.Collections.Generic.List<GameEntry>();
+        using (var dialog = new Form { Text = heading, Size = new Size(650, 515), StartPosition = FormStartPosition.CenterParent })
         using (var list = new ListBox { Dock = DockStyle.Fill })
-        using (var select = new Button { Text = "Seleziona gioco", Dock = DockStyle.Bottom, Height = 36 })
+        using (var top = new Panel { Dock = DockStyle.Top, Height = 57 })
+        using (var searchLabel = new Label { Text = "Cerca per nome", Dock = DockStyle.Top })
+        using (var search = new TextBox { Dock = DockStyle.Bottom })
+        using (var controls = new Panel { Dock = DockStyle.Bottom, Height = 42 })
+        using (var select = new Button { Text = "Usa selezione", Dock = DockStyle.Left, Width = 155 })
+        using (var browse = new Button { Text = "Scegli un file .exe", Dock = DockStyle.Right, Width = 155 })
+        using (var inventoryTimer = new System.Windows.Forms.Timer { Interval = 250 })
         {
-            list.Items.AddRange(scanned.Games.ToArray());
+            bool manual = false;
+            if (scanned == null) searchLabel.Text = (scanError ?? "Inventario in preparazione") + " • puoi scegliere un file";
+            Action refresh = delegate
+            {
+                list.BeginUpdate();
+                try
+                {
+                    list.Items.Clear();
+                    foreach (GameEntry item in catalog)
+                        if (item.Name.IndexOf(search.Text.Trim(), StringComparison.CurrentCultureIgnoreCase) >= 0) list.Items.Add(item);
+                    if (list.Items.Count > 0) list.SelectedIndex = 0;
+                }
+                finally { list.EndUpdate(); }
+                select.Enabled = list.SelectedItem != null;
+            };
+            Action populate = delegate
+            {
+                if (scanned == null)
+                {
+                    if (scanError != null) { searchLabel.Text = scanError; inventoryTimer.Stop(); }
+                    return;
+                }
+
+                var names = new System.Collections.Generic.HashSet<string>(StringComparer.CurrentCultureIgnoreCase);
+                foreach (GameEntry item in scanned.Games)
+                    if (names.Add(item.Name)) catalog.Add(item);
+                if (!gamesOnly)
+                    foreach (GameEntry item in scanned.Installed)
+                        if (names.Add(item.Name)) catalog.Add(item);
+                catalog.Sort((a, b) => StringComparer.CurrentCultureIgnoreCase.Compare(a.Name, b.Name));
+                searchLabel.Text = "Cerca per nome  •  " + catalog.Count + " voci";
+                inventoryTimer.Stop();
+                refresh();
+            };
+            inventoryTimer.Tick += delegate { populate(); };
+            if (scanned == null) inventoryTimer.Start();
+            else populate();
+            search.TextChanged += delegate { refresh(); };
             select.Click += delegate { if (list.SelectedItem != null) dialog.DialogResult = DialogResult.OK; };
             list.DoubleClick += delegate { if (list.SelectedItem != null) dialog.DialogResult = DialogResult.OK; };
+            browse.Click += delegate { manual = true; dialog.DialogResult = DialogResult.OK; };
+            top.Controls.Add(search);
+            top.Controls.Add(searchLabel);
+            controls.Controls.Add(select);
+            controls.Controls.Add(browse);
             dialog.Controls.Add(list);
-            dialog.Controls.Add(select);
+            dialog.Controls.Add(controls);
+            dialog.Controls.Add(top);
             dialog.AcceptButton = select;
-            list.SelectedIndex = 0;
-            if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            var item = (GameEntry)list.SelectedItem;
-            string executable = item.Executable ?? SelectExe("Scegli l'eseguibile di " + item.Name, item.Folder);
-            if (executable != null) SetGame(executable);
+            refresh();
+            if (dialog.ShowDialog(this) != DialogResult.OK) return null;
+            if (manual) return SelectExe("Scegli il file eseguibile");
+            var chosen = (GameEntry)list.SelectedItem;
+            return chosen.Executable ?? SelectExe("Conferma l'eseguibile di " + chosen.Name, chosen.Folder);
+        }
+    }
+
+    private void ShowBoostActions(object sender, EventArgs args)
+    {
+        using (var dialog = new Form { Text = "Azioni Boost", Size = new Size(710, 375), StartPosition = FormStartPosition.CenterParent })
+        using (var details = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true })
+        using (var current = new Label { Dock = DockStyle.Bottom, Height = 42, Padding = new Padding(8) })
+        using (var update = new System.Windows.Forms.Timer { Interval = 500 })
+        using (var actionOption = new CheckBox { Text = "Consenti riduzione temporanea della priorità", Dock = DockStyle.Top, Height = 33 })
+        using (var demo = new Button { Text = "Apri finestra di prova", Dock = DockStyle.Bottom, Height = 40 })
+        {
+            actionOption.Checked = allow.Checked;
+            actionOption.CheckedChanged += delegate { allow.Checked = actionOption.Checked; };
+            details.Columns.Add("Categoria", 144);
+            details.Columns.Add("Azione", 250);
+            details.Columns.Add("Stato", 280);
+            var live = new ListViewItem(new[] { "Processi", "Riduci priorità app secondaria", "In attesa" });
+            details.Items.Add(live);
+            details.Items.Add(new ListViewItem(new[] { "Servizi Windows", "Arresto e riavvio", "Da collaudare" }));
+            details.Items.Add(new ListViewItem(new[] { "Terze parti", "Servizi e attività in background", "Solo inventario" }));
+            details.Items.Add(new ListViewItem(new[] { "Browser", "Pausa / recupero sessione", "Da collaudare" }));
+            details.Items.Add(new ListViewItem(new[] { "Shell", "Explorer", "Recupero non verificato" }));
+            details.Items.Add(new ListViewItem(new[] { "GPU / energia", "Calibrazione e profilo energetico", "Solo diagnosi" }));
+            details.Items.Add(new ListViewItem(new[] { "Sicurezza", "Defender e firewall", "Protetti" }));
+
+            Action updateStatus = delegate
+            {
+                string state = !allow.Checked ? "Disabilitata" : !enabled.Checked ? "Boost spento" :
+                    profile.SelectedIndex == 0 ? "Conservativo: solo anteprima" :
+                    action.Pending ? "Priorità ridotta" : "In attesa delle condizioni";
+                live.SubItems[2].Text = state;
+                if (optional == null || optional.HasExited)
+                {
+                    current.Text = "Apri una finestra di prova per vedere la priorità cambiare e tornare al valore originale.";
+                    return;
+                }
+                try
+                {
+                    optional.Refresh();
+                    current.Text = optional.ProcessName + "  •  Priorità Windows: " + optional.PriorityClass;
+                }
+                catch (InvalidOperationException) { current.Text = "App secondaria terminata."; }
+                catch (System.ComponentModel.Win32Exception) { current.Text = "Priorità attuale non leggibile."; }
+            };
+            update.Tick += delegate { updateStatus(); };
+            updateStatus();
+            update.Start();
+            demo.Click += delegate {
+                if (optional != null && !optional.HasExited)
+                {
+                    MessageBox.Show(dialog, "C'è già un'app secondaria. Chiudila prima di avviare la prova.");
+                    return;
+                }
+                if (!Recover("Pronto per la prova.")) return;
+                if (optional != null) { optional.Dispose(); optional = null; }
+                try
+                {
+                    optional = Process.Start(new ProcessStartInfo(Application.ExecutablePath, "--demo-worker") { UseShellExecute = false });
+                    status.Text = "Finestra di prova avviata. Con Minecraft attivo, consenti l'intervento e scegli il profilo.";
+                    dialog.Close();
+                }
+                catch (Exception error) { MessageBox.Show(dialog, error.Message); }
+            };
+            dialog.Controls.Add(details);
+            dialog.Controls.Add(current);
+            dialog.Controls.Add(demo);
+            dialog.Controls.Add(actionOption);
+            dialog.ShowDialog(this);
         }
     }
 
@@ -897,7 +1038,7 @@ internal sealed class Dashboard : Form
 
     private void ChooseGame(object sender, EventArgs args)
     {
-        string selected = SelectExe("Scegli l'eseguibile del gioco");
+        string selected = SelectCatalogExecutable("Scegli gioco o applicazione", false);
         if (selected != null) SetGame(selected);
     }
 
@@ -922,7 +1063,7 @@ internal sealed class Dashboard : Form
     private void StartOptional(object sender, EventArgs args)
     {
         if (optional != null && !optional.HasExited) { status.Text = "L'app secondaria è già attiva."; return; }
-        string selected = SelectExe("Avvia un'app secondaria per questa sessione");
+        string selected = SelectCatalogExecutable("Avvia app secondaria", false);
         if (selected == null) return;
         string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\') + "\\";
         if (selected.StartsWith(windows, StringComparison.OrdinalIgnoreCase) ||
