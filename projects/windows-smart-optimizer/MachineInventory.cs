@@ -368,12 +368,9 @@ internal sealed class MachineInventory
         AddList(tabs, "Servizi", Services);
         AddList(tabs, "Avvio automatico", Startup);
         AddList(tabs, "Attività", Tasks);
-        AddList(tabs, "Esperto", new List<string> {
-            "Riduzione di priorità: solo app secondaria avviata dal booster; originale salvato, scadenza e rollback.",
-            "Explorer, browser, servizi e protezioni: nessun intervento applicato.",
-            "GPU: sola diagnosi; capacità di modifica e ripristino non verificate.",
-            "Piano energetico, affinità e tweak storici: in valutazione."
-        });
+        var expert = new TabPage("Esperto");
+        expert.Controls.Add(ExpertSettings.CreateView());
+        tabs.TabPages.Add(expert);
     }
 
     private static void AddList(TabControl tabs, string name, List<string> lines)
@@ -633,5 +630,73 @@ internal static class AmdDiagnostics
                 foreach (IntPtr buffer in buffers) System.Runtime.InteropServices.Marshal.FreeHGlobal(buffer);
             }
         }
+    }
+}
+
+internal static class ExpertSettings
+{
+    public static ListView CreateView()
+    {
+        var list = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, ShowItemToolTips = true };
+        list.Columns.Add("Impostazione", 218);
+        list.Columns.Add("Valore attuale", 160);
+        list.Columns.Add("Profilo del PC", 142);
+        list.Columns.Add("Motivo", 505);
+        string control = @"SYSTEM\CurrentControlSet\Control\";
+        string memory = control + @"Session Manager\Memory Management";
+        string desktop = @"Control Panel\Desktop";
+        Add(list, "Scheduler in primo piano", Registry.LocalMachine, control + "PriorityControl", "Win32PrioritySeparation", "Effetto sugli FPS non dimostrato.");
+        Add(list, "Worker ritardati", Registry.LocalMachine, control + "Session Manager\\Executive", "AdditionalDelayedWorkerThreads", "Valore storico. Supporto e beneficio non verificati.");
+        Add(list, "Worker critici", Registry.LocalMachine, control + "Session Manager\\Executive", "AdditionalCriticalWorkerThreads", "Valore storico. Supporto e beneficio non verificati.");
+        Add(list, "Paging del kernel", Registry.LocalMachine, memory, "DisablePagingExecutive", "Mantieni la gestione attuale su un PC con memoria limitata.");
+        Add(list, "Cache di sistema", Registry.LocalMachine, memory, "LargeSystemCache", "Cambiare equilibrio cache/processi può aumentare la pressione RAM.");
+        Add(list, "Prefetch", Registry.LocalMachine, memory + @"\PrefetchParameters", "EnablePrefetcher", "Mantieni il comportamento di avvio del sistema.");
+        Add(list, "Svuota pagefile allo spegnimento", Registry.LocalMachine, memory, "ClearPageFileAtShutdown", "Impostazione di spegnimento, non di prestazioni in gioco.");
+        Add(list, "Nomi NTFS 8.3", Registry.LocalMachine, control + "FileSystem", "NtfsDisable8dot3NameCreation", "Può influire sulla compatibilità dei programmi installati.");
+        Add(list, "Ultimo accesso NTFS", Registry.LocalMachine, control + "FileSystem", "NtfsDisableLastAccessUpdate", "Impostazione a livello di file system; vantaggio in gioco non misurato.");
+        Add(list, "Riavvio automatico Explorer", Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", "AutoRestartShell", "Mantieni il recupero della shell.");
+        Add(list, "Applicazioni bloccate", Registry.CurrentUser, desktop, "HungAppTimeout", "Una chiusura anticipata può interrompere lavoro in corso.");
+        Add(list, "Chiusura applicazioni", Registry.CurrentUser, desktop, "WaitToKillAppTimeout", "Preserva il tempo per salvare in uscita.");
+        Add(list, "Chiusura servizi", Registry.LocalMachine, control.TrimEnd('\\'), "WaitToKillServiceTimeout", "Una scadenza più breve può interrompere l'arresto dei servizi.");
+        Add(list, "Attivazione finestra", Registry.CurrentUser, desktop, "ForegroundLockTimeout", "Preferenza delle finestre, senza beneficio FPS verificato.");
+        Add(list, "Ritardo menu", Registry.CurrentUser, desktop, "MenuShowDelay", "Preferenza dell'interfaccia.");
+        Add(list, "Smussatura caratteri", Registry.CurrentUser, desktop, "FontSmoothing", "Preferenza di leggibilità.");
+        Add(list, "ClearType", Registry.CurrentUser, desktop, "FontSmoothingType", "Preferenza di leggibilità.");
+        Add(list, "Animazioni minimizzazione", Registry.CurrentUser, desktop + @"\WindowMetrics", "MinAnimate", "Preferenza dell'interfaccia.");
+        Add(list, "Effetti visivi", Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects", "VisualFXSetting", "Preferenza del desktop.");
+        Add(list, "Finestre Esplora file separate", Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "SeparateProcess", "Preferenza della shell.");
+        Add(list, "Animazioni barra applicazioni", Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "TaskbarAnimations", "Preferenza del desktop.");
+        Add(list, "Segnalazione errori", Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows\Windows Error Reporting", "Disabled", "Mantieni la diagnostica del sistema.");
+        string plan = "Non leggibile";
+        try
+        {
+            Guid active = PowerPlanAction.Read();
+            plan = active == PowerPlanAction.Performance ? "Prestazioni elevate" :
+                active == new Guid("381b4222-f694-41f0-9685-ff5bb260df2e") ? "Bilanciato" : active.ToString("D");
+        }
+        catch (System.ComponentModel.Win32Exception) { }
+        list.Items.Add(new ListViewItem(new[] { "Piano energetico", plan, "Mantieni", "Prestazioni elevate è una prova facoltativa con ripristino. Guadagno in gioco da misurare." }));
+        list.Items.Add(new ListViewItem(new[] { "Profilo GPU", "Rilevamento nella scheda GPU", "Sola diagnosi", "Calibrazione e rollback non verificati." }));
+        list.Items.Add(new ListViewItem(new[] { "Tweak storici non mappati", "Non verificato", "Non applicabili", "IoPageLockLimit, AlwaysUnloadDLL, MSConfig, aggiornamento IE/Media Player e altre voci obsolete o ambigue." }));
+        return list;
+    }
+
+    private static void Add(ListView list, string label, RegistryKey hive, string path, string name, string reason)
+    {
+        string current = "Non impostato";
+        try
+        {
+            using (var key = hive.OpenSubKey(path, false))
+            {
+                object value = key == null ? null : key.GetValue(name);
+                if (value != null) current = Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+        catch (UnauthorizedAccessException) { current = "Accesso limitato"; }
+        catch (System.Security.SecurityException) { current = "Accesso limitato"; }
+        catch (IOException) { current = "Non leggibile"; }
+        list.Items.Add(new ListViewItem(new[] { label, current, "Mantieni", reason }) {
+            ToolTipText = hive.Name + "\\" + path + "  |  " + name
+        });
     }
 }
