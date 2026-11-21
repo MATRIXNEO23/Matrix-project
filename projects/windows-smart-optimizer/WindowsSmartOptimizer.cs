@@ -19,6 +19,15 @@ internal static class Optimizer
     private static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--test-worker") { Thread.Sleep(60000); return 0; }
+        if (args.Length == 2 && args[0] == "--test-child-owner")
+        {
+            using (var child = Process.Start(Application.ExecutablePath, "--test-worker"))
+            {
+                File.WriteAllText(args[1], child.Id.ToString(CultureInfo.InvariantCulture));
+                child.WaitForExit();
+            }
+            return 0;
+        }
         if (args.Length == 2 && args[0] == "--self-test")
         {
             try { SelfTest(args[1]); return 0; }
@@ -131,8 +140,35 @@ internal static class Optimizer
         return match;
     }
 
+    private static void TestSteamDiscovery(string folder)
+    {
+        string steam = Path.Combine(folder, "steamapps");
+        string common = Path.Combine(steam, "common");
+        string installed = Path.Combine(common, "GameFixture");
+        Directory.CreateDirectory(installed);
+        string real = Path.Combine(steam, "appmanifest_1.acf");
+        string bad = Path.Combine(steam, "appmanifest_2.acf");
+        try
+        {
+            File.WriteAllText(real, "\"AppState\"\n{\n\"name\" \"Fixture Steam\"\n\"installdir\" \"GameFixture\"\n}\n");
+            File.WriteAllText(bad, "\"name\" \"Percorso non valido\"\n\"installdir\" \"..\"\n");
+            var games = MachineInventory.ScanSteam(folder);
+            if (games.Count != 1 || games[0].Name != "Fixture Steam" || games[0].Folder != installed || games[0].Executable != null)
+                throw new Exception("Libreria Steam sintetica non riconosciuta.");
+        }
+        finally
+        {
+            File.Delete(real);
+            File.Delete(bad);
+            Directory.Delete(installed);
+            Directory.Delete(common);
+            Directory.Delete(steam);
+        }
+    }
+
     private static void SelfTest(string directory)
     {
+        TestSteamDiscovery(directory);
         string exe = Application.ExecutablePath;
         string gamePath = Path.Combine(directory, "GameFixture.exe");
         File.Copy(exe, gamePath, false);
@@ -187,13 +223,53 @@ internal static class Optimizer
                 if (worker.PriorityClass != ProcessPriorityClass.Idle || action.Pending)
                     throw new Exception("Modifica concorrente sovrascritta.");
                 worker.PriorityClass = initial;
+                VerifyGameTree(gamePath, directory);
                 File.WriteAllText(Path.Combine(directory, "result.txt"),
-                    "OK: telemetria, rilevamento/uscita gioco simulato, priorità, ripristino, recupero journal, arresto proprietario, scadenza e modifica concorrente.");
+                    "OK: inventario Steam sintetico, telemetria, rilevamento/uscita gioco simulato, priorità, ripristino, recupero journal, arresto proprietario, scadenza, modifica concorrente e gioco con processo figlio.");
             }
             finally
             {
                 if (!game.HasExited) game.Kill();
                 if (!worker.HasExited) worker.Kill();
+            }
+        }
+    }
+    private static void VerifyGameTree(string exe, string directory)
+    {
+        string marker = Path.Combine(directory, "child.pid");
+        Process child = null;
+        using (var parent = Process.Start(exe, "--test-child-owner \"" + marker + "\""))
+        {
+            try
+            {
+                int id = 0;
+                var clock = Stopwatch.StartNew();
+                while (clock.ElapsedMilliseconds < 5000)
+                {
+                    try { if (File.Exists(marker) && Int32.TryParse(File.ReadAllText(marker), out id)) break; }
+                    catch (IOException) { }
+                    Thread.Sleep(50);
+                }
+                if (id == 0) throw new Exception("Processo figlio non pronto.");
+                child = Process.GetProcessById(id);
+                using (var tree = new GameTree(parent))
+                {
+                    if (!tree.Update(parent) || !tree.Contains(id)) throw new Exception("Figlio del gioco non rilevato.");
+                    parent.Kill();
+                    if (!parent.WaitForExit(5000) || !tree.Update(parent)) throw new Exception("Sessione chiusa prima del figlio.");
+                    child.Kill();
+                    if (!child.WaitForExit(5000) || tree.Update(parent)) throw new Exception("Uscita dell'albero non rilevata.");
+                }
+            }
+            finally
+            {
+                if (!parent.HasExited) { parent.Kill(); parent.WaitForExit(5000); }
+                if (child != null)
+                {
+                    if (!child.HasExited) { child.Kill(); child.WaitForExit(5000); }
+                    child.Dispose();
+                }
+                File.Delete(marker);
             }
         }
     }
@@ -477,6 +553,7 @@ internal sealed class Dashboard : Form
     private readonly ComboBox profile = new ComboBox();
     private readonly ResourceTrend trend = new ResourceTrend();
     private Process optional, game, watcher;
+    private GameTree gameTree;
     private string gamePath;
     private Telemetry previous;
     private bool waitingAfterRestore;
@@ -526,6 +603,7 @@ internal sealed class Dashboard : Form
         Add(Button("Ripristino d'emergenza", Restore), 514, 344, 160, 34);
         Add(Button("Importa profilo", ImportProfile), 24, 392, 140, 34);
         Add(Button("Esporta profilo", ExportProfile), 175, 392, 140, 34);
+        Add(Button("Libreria giochi", ShowGameLibrary), 326, 392, 145, 34);
         Add(status, 24, 446, 650, 62);
         profile.SelectedIndexChanged += delegate { SavePreferences(); };
         allow.CheckedChanged += delegate { SavePreferences(); };
@@ -545,6 +623,7 @@ internal sealed class Dashboard : Form
             io.Dispose();
             if (optional != null) optional.Dispose();
             if (game != null) game.Dispose();
+            if (gameTree != null) gameTree.Dispose();
             if (watcher != null) watcher.Dispose();
         };
     }
@@ -580,9 +659,10 @@ internal sealed class Dashboard : Form
                 {
                     scanned = snapshot;
                     scanError = failure;
-                    if (snapshot != null && gamePath == null && snapshot.Launchers.Count == 1)
+                    var known = snapshot == null ? null : snapshot.Games.FindAll(item => item.Executable != null);
+                    if (known != null && gamePath == null && known.Count == 1)
                     {
-                        gamePath = snapshot.Launchers[0];
+                        gamePath = known[0].Executable;
                         LoadPreferences();
                         gameLabel.Text = "Gioco rilevato: " + Path.GetFileName(gamePath);
                     }
@@ -673,6 +753,28 @@ internal sealed class Dashboard : Form
         }
     }
 
+    private void ShowGameLibrary(object sender, EventArgs args)
+    {
+        if (scanned == null) { status.Text = scanError ?? "Scansione del PC in corso."; return; }
+        if (scanned.Games.Count == 0) { status.Text = "Nessun gioco rilevato. Usa Scegli gioco per aggiungerlo."; return; }
+        using (var dialog = new Form { Text = "Libreria giochi", Size = new Size(560, 410), StartPosition = FormStartPosition.CenterParent })
+        using (var list = new ListBox { Dock = DockStyle.Fill })
+        using (var select = new Button { Text = "Seleziona gioco", Dock = DockStyle.Bottom, Height = 36 })
+        {
+            list.Items.AddRange(scanned.Games.ToArray());
+            select.Click += delegate { if (list.SelectedItem != null) dialog.DialogResult = DialogResult.OK; };
+            list.DoubleClick += delegate { if (list.SelectedItem != null) dialog.DialogResult = DialogResult.OK; };
+            dialog.Controls.Add(list);
+            dialog.Controls.Add(select);
+            dialog.AcceptButton = select;
+            list.SelectedIndex = 0;
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            var item = (GameEntry)list.SelectedItem;
+            string executable = item.Executable ?? SelectExe("Scegli l'eseguibile di " + item.Name, item.Folder);
+            if (executable != null) SetGame(executable);
+        }
+    }
+
     private void UpdateShortcut()
     {
         if (!shortcut.Checked) { ReleaseShortcut(); return; }
@@ -697,7 +799,7 @@ internal sealed class Dashboard : Form
     {
         if (message.Msg == HotkeyMessage && message.WParam.ToInt64() == BoostHotkeyId && shortcutRegistered)
         {
-            if (game == null || game.HasExited)
+            if (game == null || (game.HasExited && gameTree == null))
             {
                 status.Text = "Scorciatoia ignorata: nessun gioco configurato è in esecuzione.";
                 return;
@@ -731,16 +833,22 @@ internal sealed class Dashboard : Form
         return button;
     }
 
-    private string SelectExe(string title)
+    private string SelectExe(string title, string folder = null)
     {
-        using (var picker = new OpenFileDialog { Filter = "Eseguibili Windows (*.exe)|*.exe", Title = title })
+        using (var picker = new OpenFileDialog {
+            Filter = "Eseguibili Windows (*.exe)|*.exe", Title = title, InitialDirectory = folder ?? String.Empty
+        })
             return picker.ShowDialog(this) == DialogResult.OK ? Path.GetFullPath(picker.FileName) : null;
     }
 
     private void ChooseGame(object sender, EventArgs args)
     {
         string selected = SelectExe("Scegli l'eseguibile del gioco");
-        if (selected == null) return;
+        if (selected != null) SetGame(selected);
+    }
+
+    private void SetGame(string selected)
+    {
         if (optional != null && !optional.HasExited &&
             ExecutableIdentity.Matches(optional.MainModule.FileName, selected))
         {
@@ -749,6 +857,7 @@ internal sealed class Dashboard : Form
         }
         if (!Recover("Gioco configurato.")) return;
         if (game != null) { game.Dispose(); game = null; }
+        if (gameTree != null) { gameTree.Dispose(); gameTree = null; }
         enabled.Checked = false;
         waitingAfterRestore = false;
         gamePath = selected;
@@ -810,6 +919,7 @@ internal sealed class Dashboard : Form
                         {
                             string category = "Da valutare";
                             if (game != null && process.Id == game.Id) category = "Gioco";
+                            else if (gameTree != null && gameTree.Contains(process.Id)) category = "Figlio del gioco";
                             else if (optional != null && process.Id == optional.Id) category = "App secondaria avviata";
                             else if (process.Id == 4 || process.SessionId == 0) category = "Sistema o servizio";
                             else
@@ -904,15 +1014,25 @@ internal sealed class Dashboard : Form
             busySamples = cpuLoad >= 70 ? Math.Min(2, busySamples + 1) : 0;
             previous = now;
 
-            if (game != null && game.HasExited)
+            if (game != null && !(gameTree == null ? !game.HasExited : gameTree.Update(game)))
             {
                 game.Dispose();
                 game = null;
+                if (gameTree != null) { gameTree.Dispose(); gameTree = null; }
                 waitingAfterRestore = false;
                 busySamples = 0;
                 if (!Recover("Gioco terminato. Priorità originale ripristinata.")) return;
             }
-            if (game == null) game = Optimizer.FindGame(gamePath);
+            if (game == null)
+            {
+                game = Optimizer.FindGame(gamePath);
+                if (game != null)
+                {
+                    try { gameTree = new GameTree(game); gameTree.Update(game); }
+                    catch (System.ComponentModel.Win32Exception) { }
+                    catch (InvalidOperationException) { }
+                }
+            }
             timer.Interval = game == null ? 3000 : 1000;
             if (gamePath != null) gameLabel.Text = (game == null ? "In attesa di " : "Gioco attivo: ") + Path.GetFileName(gamePath);
 
