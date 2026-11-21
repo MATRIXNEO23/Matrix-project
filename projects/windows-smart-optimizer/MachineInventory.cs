@@ -399,28 +399,31 @@ internal sealed class GamePreferences
 {
     public readonly int Level;
     public readonly bool LowerPriority, HighPerformance, Minimize;
+    public readonly string Secondary;
 
-    public GamePreferences(int level, bool lowerPriority, bool highPerformance = false, bool minimize = false)
+    public GamePreferences(int level, bool lowerPriority, bool highPerformance = false, bool minimize = false, string secondary = null)
     {
         if (level < 0 || level > 2) throw new ArgumentOutOfRangeException("level");
         Level = level;
         LowerPriority = lowerPriority;
         HighPerformance = highPerformance;
         Minimize = minimize;
+        Secondary = String.IsNullOrEmpty(secondary) ? null : secondary;
     }
 
     public static GamePreferences Read(string path)
     {
-        if (new FileInfo(path).Length > 128) throw new InvalidDataException("Profilo troppo grande.");
+        if (new FileInfo(path).Length > 8192) throw new InvalidDataException("Profilo troppo grande.");
         string[] fields = File.ReadAllLines(path);
         int level;
         bool lower, energy = false, window = false;
         bool supported = (fields.Length == 3 && fields[0] == "MatrixGameProfile/1") ||
-            (fields.Length == 5 && fields[0] == "MatrixGameProfile/2" &&
+            (((fields.Length == 5 && fields[0] == "MatrixGameProfile/2") ||
+              (fields.Length == 6 && fields[0] == "MatrixGameProfile/3")) &&
                 Boolean.TryParse(fields[3], out energy) && Boolean.TryParse(fields[4], out window));
         if (!supported || !Int32.TryParse(fields[1], out level) || level < 0 || level > 2 ||
             !Boolean.TryParse(fields[2], out lower)) throw new InvalidDataException("Profilo non valido.");
-        return new GamePreferences(level, lower, energy, window);
+        return new GamePreferences(level, lower, energy, window, fields.Length == 6 ? fields[5] : null);
     }
 
     public void Save(string path)
@@ -430,7 +433,7 @@ internal sealed class GamePreferences
         string pending = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
-            File.WriteAllLines(pending, new[] { "MatrixGameProfile/2", Level.ToString(), LowerPriority.ToString(), HighPerformance.ToString(), Minimize.ToString() });
+            File.WriteAllLines(pending, new[] { "MatrixGameProfile/3", Level.ToString(), LowerPriority.ToString(), HighPerformance.ToString(), Minimize.ToString(), Secondary ?? "" });
             if (File.Exists(path)) File.Replace(pending, path, null);
             else File.Move(pending, path);
         }
