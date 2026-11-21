@@ -36,3 +36,14 @@ L'interfaccia mostra la RAM disponibile prima e dopo il ripristino. `misure.tsv`
 - Benchmark sintetico: due carichi sullo stesso core, con campioni di 1,25 secondi. Il primo carico ha ricevuto il 47,9%, 53,9% e 51,9% della CPU attribuita ai due carichi a pari priorità. Con la riduzione dell'altro carico, il primo ha ricevuto il 100% in tutti e tre i campioni. La priorità è stata ripristinata in tutti i casi. Questo evidenzia il rischio di rallentare il carico secondario e ha motivato il limite temporale. Non misura FPS o latenza di un gioco. `Benchmark.cs` si compila insieme a `WindowsSmartOptimizer.cs` con le stesse referenze di `Compila.ps1`, aggiungendo `/main:Benchmark`, usando `/target:exe` e passando al binario una cartella temporanea vuota.
 - Prova con Minecraft for Windows 1.26.6501.0. Il rilevatore ha associato l'eseguibile selezionato in XboxGames al processo avviato da WindowsApps, dopo aver verificato che i percorsi puntano allo stesso file. La prova ha rilevato l'uscita normale di Minecraft e verificato il ripristino della priorità di un processo sintetico separato. La prova si è limitata alla finestra del gioco, senza aprire mondi.
 - Rimangono da verificare il comportamento durante una partita e su hardware rappresentativo da 4 GB, il confronto indipendente sistematico della telemetria e il ripristino dopo un riavvio reale. Da completare la mappa delle dipendenze del gioco, l'adattamento basato su benefici ripetibili e le misure comparabili di latenza e FPS. Il prototipo non certifica benefici di prestazioni.
+
+### Cattura fotogrammi con Minecraft
+
+Intel PresentMon 2.6.0, Minecraft in finestra sul PC Windows 10 da 9,98 GiB. Due coppie da otto secondi, nell'ordine spento/acceso e acceso/spento. La finestra è rimasta in primo piano per le quattro catture valide. Una cattura iniziale è stata scartata per perdita del primo piano. La scena esatta non è stata verificata dall'automazione. L'intervento ha ridotto soltanto la priorità di un carico CPU sintetico, ripristinata dopo ciascun passaggio.
+
+| Prova | FPS visualizzati spento → acceso | 95° percentile del tempo fra fotogrammi spento → acceso |
+| --- | ---: | ---: |
+| 1 | 51,43 → 58,37 | 33,32 → 16,69 ms |
+| 2 | 56,59 → 55,84 | 33,31 → 33,32 ms |
+
+Gli FPS derivano dalla media degli intervalli di cambio immagine della catena di presentazione di Minecraft. Il 99° percentile è rimasto intorno a 33,34 ms. L'effetto positivo della prima coppia non si è ripetuto. Questa prova breve non dimostra un aumento stabile di FPS o fluidità e non misura la latenza di input.
