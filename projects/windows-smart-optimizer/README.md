@@ -127,3 +127,11 @@ La spunta Minimizza e ripristina in Azioni Boost riguarda la finestra principale
 Su una finestra di prova Windows sono stati osservati minimizzazione, stesso processo, ritorno alla geometria originale e rispetto del ripristino manuale. Tre prove integrate passate. Il valore NTFS 0x80000002 appare come Sistema · disabilitato, come confermato da fsutil. Build aperta a boost spento, 89.600 byte, SHA-256 `BE7DCF916D0DC9CEE9D99033D11C70490F76CBD2B39E3E7F6674E934455CA232`.
 
 Quest'azione preserva la sessione di una finestra. Mancano ancora gli adapter per disabilitare processi o servizi con ripristino verificato, chiudere e riaprire app, e applicare automaticamente impostazioni Windows calibrate tramite benchmark. Il profilo consigliato conserva i valori correnti finché non emerge un vantaggio ripetibile.
+
+### Avvio automatico per programmi spuntati
+
+Avvio automatico mostra un elenco di eseguibili con spunte. La lista include i giochi e le app per cui è disponibile un eseguibile selezionabile; si può aggiungere un .exe locale dalla scelta manuale. Il comando Salva conserva le spunte e l'interruttore generale per l'utente corrente. L'opzione è spenta per impostazione predefinita; funziona mentre la dashboard è aperta, senza avviare programmi o registrare un avvio all'accesso a Windows.
+
+Quando viene rilevato un eseguibile spuntato, la dashboard carica il profilo del gioco e abilita il boost. Il profilo Conservativo fa solo anteprima. Il rilevamento segue una sessione per volta e attende l'uscita delle dipendenze già riconosciute. Il boost si disattiva e ripristina le azioni quando la sessione finisce. La disattivazione manuale resta valida finché il gioco resta aperto. Se viene riconosciuto un ripristino pendente dopo un arresto, l'avvio automatico resta sospeso per l'istanza corrente. I profili v2 salvano anche le opzioni energia e finestre; il formato v1 resta leggibile e mantiene queste opzioni disattivate.
+
+Verifica con fixture sul PC: programma non spuntato ignorato; programma spuntato riconosciuto con il suo profilo; alla sua uscita, boost spento e priorità della fixture riportata a Normale. Tre test integrati riusciti; dashboard finale aperta, build 96.768 byte, SHA-256 `3A54B7C06C045A8BCA9684C7E683927A2AD57AB42F0FFE25D515DE1FE46E3FDC`.
