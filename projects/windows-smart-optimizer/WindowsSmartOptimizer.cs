@@ -159,7 +159,7 @@ internal static class Optimizer
         }
     }
 
-    public static Process FindGame(string path)
+    public static Process FindGame(string path, bool visible = false)
     {
         if (String.IsNullOrEmpty(path)) return null;
         Process match = null;
@@ -169,7 +169,7 @@ internal static class Optimizer
         {
             try
             {
-                if (match == null && process.SessionId == session &&
+                if (match == null && process.SessionId == session && (!visible || process.MainWindowHandle != IntPtr.Zero) &&
                     ExecutableIdentity.Matches(process.MainModule.FileName, path)) match = process;
             }
             catch (System.ComponentModel.Win32Exception) { }
@@ -770,6 +770,36 @@ internal sealed class WindowAction
 
 internal sealed class RelaunchAction
 {
+    private delegate bool WindowCallback(IntPtr window, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(WindowCallback callback, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out int process);
+
+    private static int VisibleWindows(int pid)
+    {
+        int count = 0;
+        EnumWindows(delegate(IntPtr window, IntPtr parameter)
+        {
+            int owner;
+            GetWindowThreadProcessId(window, out owner);
+            if (owner == pid && IsWindowVisible(window)) count++;
+            return true;
+        }, IntPtr.Zero);
+        return count;
+    }
+
+    private static bool BrowserSession(string path)
+    {
+        string name = Path.GetFileName(path);
+        return String.Equals(name, "msedge.exe", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(name, "chrome.exe", StringComparison.OrdinalIgnoreCase);
+    }
     private readonly string journal;
     private readonly bool group;
     public RelaunchAction(string folder) : this(Path.Combine(folder, "relaunch.pending"), true) { }
@@ -819,7 +849,7 @@ internal sealed class RelaunchAction
         string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\') + "\\";
         if (file.StartsWith(windows, StringComparison.OrdinalIgnoreCase)) return false;
         string name = Path.GetFileNameWithoutExtension(file).ToLowerInvariant();
-        if (PriorityAction.IsProtectedName(name) || name == "msedge" || name == "chrome" ||
+        if (PriorityAction.IsProtectedName(name) ||
             name == "firefox" || name == "opera" || name == "brave" || name == "vivaldi") return false;
         bool same = ExecutableIdentity.Matches(file, Application.ExecutablePath);
         return demo == same;
@@ -835,7 +865,9 @@ internal sealed class RelaunchAction
             if (process.HasExited || process.SessionId == 0 || process.MainWindowHandle == IntPtr.Zero) return;
             string file = process.MainModule.FileName;
             if (!Eligible(file, demo)) throw new InvalidOperationException("Questa app non può essere chiusa dal boost.");
-            string record = String.Join("\n", file, demo ? "demo" : "standard",
+            bool browser = BrowserSession(file);
+            if (browser && VisibleWindows(process.Id) != 1) return;
+            string record = String.Join("\n", file, demo ? "demo" : browser ? "browser" : "standard",
                 process.Id.ToString(CultureInfo.InvariantCulture),
                 process.StartTime.ToFileTimeUtc().ToString(CultureInfo.InvariantCulture));
             Directory.CreateDirectory(Path.GetDirectoryName(journal));
@@ -883,21 +915,24 @@ internal sealed class RelaunchAction
             string[] fields = File.ReadAllLines(journal);
             int originalPid;
             long originalStart;
-            if (fields.Length != 4 || (fields[1] != "demo" && fields[1] != "standard") ||
+            if (fields.Length != 4 || (fields[1] != "demo" && fields[1] != "standard" && fields[1] != "browser") ||
                 !Int32.TryParse(fields[2], out originalPid) || originalPid <= 0 ||
                 !Int64.TryParse(fields[3], out originalStart) || originalStart <= 0 ||
                 !Eligible(fields[0], fields[1] == "demo"))
                 throw new InvalidDataException("Il journal di riapertura non è valido o l'eseguibile non è più disponibile.");
+            bool browser = fields[1] == "browser";
+            if (browser && !BrowserSession(fields[0])) throw new InvalidDataException("Browser di ripristino non valido.");
 
-            using (Process existing = Optimizer.FindGame(fields[0]))
+            using (Process existing = Optimizer.FindGame(fields[0], browser))
             {
-                if (existing != null)
+                if (existing != null && (!browser || VisibleWindows(existing.Id) > 0))
                 {
                     File.Delete(journal);
                     return;
                 }
             }
-            using (Process launched = Process.Start(new ProcessStartInfo(fields[0], fields[1] == "demo" ? "--demo-worker" : "") {
+            string arguments = fields[1] == "demo" ? "--demo-worker" : browser ? "--restore-last-session" : "";
+            using (Process launched = Process.Start(new ProcessStartInfo(fields[0], arguments) {
                 UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(fields[0])
             }))
             {
@@ -1619,7 +1654,7 @@ internal sealed class Dashboard : Form
                 catch (Exception error) { status.Text = "Ripristino servizio: " + error.Message; }
             };
             details.Items.Add(new ListViewItem(new[] { "Terze parti", "Servizi e attività in background", "Solo inventario" }));
-            details.Items.Add(new ListViewItem(new[] { "Browser", "Pausa / recupero sessione", "Da collaudare" }));
+            details.Items.Add(new ListViewItem(new[] { "Browser", "Edge e Chrome, una finestra", "Riapertura con ultima sessione" }));
             details.Items.Add(new ListViewItem(new[] { "Shell", "Explorer", "Recupero non verificato" }));
             var energy = new ListViewItem(new[] { "Energia", "Prestazioni elevate temporaneo", "Disabilitato" });
             details.Items.Add(energy);
@@ -1916,7 +1951,7 @@ internal sealed class Dashboard : Form
             .OrderBy(Path.GetFileName).ToList();
         using (var dialog = new Form { Text = "App da chiudere e riaprire", Size = new Size(730, 480), StartPosition = FormStartPosition.CenterParent })
         using (var apps = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true, HorizontalScrollbar = true })
-        using (var note = new Label { Dock = DockStyle.Top, Height = 52, Text = "Al boost le app selezionate ricevono una richiesta di chiusura normale. Al ripristino vengono riaperte come nuove istanze. Salva il lavoro prima di attivare il boost." })
+        using (var note = new Label { Dock = DockStyle.Top, Height = 64, Text = "Salva il lavoro prima del boost. Le app selezionate vengono chiuse normalmente e riaperte come nuove istanze. Edge e Chrome con una sola finestra tentano di recuperare l’ultima sessione. Le schede private non vengono recuperate." })
         using (var save = new Button { Text = "Salva selezione per questa sessione", Dock = DockStyle.Bottom, Height = 40, DialogResult = DialogResult.OK })
         {
             foreach (string file in paths) apps.Items.Add(file, selected.Contains(file, StringComparer.OrdinalIgnoreCase));
@@ -1943,7 +1978,7 @@ internal sealed class Dashboard : Form
             Process process = null;
             try
             {
-                process = Optimizer.FindGame(file);
+                process = Optimizer.FindGame(file, true);
                 if (process != null && IsSecondaryPath(file) && relaunch.ApplyOne(process))
                 {
                     closingApps.Add(process);
