@@ -398,13 +398,15 @@ internal sealed class GameEntry
 internal sealed class GamePreferences
 {
     public readonly int Level;
-    public readonly bool LowerPriority;
+    public readonly bool LowerPriority, HighPerformance, Minimize;
 
-    public GamePreferences(int level, bool lowerPriority)
+    public GamePreferences(int level, bool lowerPriority, bool highPerformance = false, bool minimize = false)
     {
         if (level < 0 || level > 2) throw new ArgumentOutOfRangeException("level");
         Level = level;
         LowerPriority = lowerPriority;
+        HighPerformance = highPerformance;
+        Minimize = minimize;
     }
 
     public static GamePreferences Read(string path)
@@ -412,11 +414,13 @@ internal sealed class GamePreferences
         if (new FileInfo(path).Length > 128) throw new InvalidDataException("Profilo troppo grande.");
         string[] fields = File.ReadAllLines(path);
         int level;
-        bool lower;
-        if (fields.Length != 3 || fields[0] != "MatrixGameProfile/1" ||
-            !Int32.TryParse(fields[1], out level) || level < 0 || level > 2 || !Boolean.TryParse(fields[2], out lower))
-            throw new InvalidDataException("Profilo non valido.");
-        return new GamePreferences(level, lower);
+        bool lower, energy = false, window = false;
+        bool supported = (fields.Length == 3 && fields[0] == "MatrixGameProfile/1") ||
+            (fields.Length == 5 && fields[0] == "MatrixGameProfile/2" &&
+                Boolean.TryParse(fields[3], out energy) && Boolean.TryParse(fields[4], out window));
+        if (!supported || !Int32.TryParse(fields[1], out level) || level < 0 || level > 2 ||
+            !Boolean.TryParse(fields[2], out lower)) throw new InvalidDataException("Profilo non valido.");
+        return new GamePreferences(level, lower, energy, window);
     }
 
     public void Save(string path)
@@ -426,7 +430,7 @@ internal sealed class GamePreferences
         string pending = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
-            File.WriteAllLines(pending, new[] { "MatrixGameProfile/1", Level.ToString(), LowerPriority.ToString() });
+            File.WriteAllLines(pending, new[] { "MatrixGameProfile/2", Level.ToString(), LowerPriority.ToString(), HighPerformance.ToString(), Minimize.ToString() });
             if (File.Exists(path)) File.Replace(pending, path, null);
             else File.Move(pending, path);
         }
@@ -709,5 +713,75 @@ internal static class ExpertSettings
         list.Items.Add(new ListViewItem(new[] { label, current, "Mantieni", reason }) {
             ToolTipText = hive.Name + "\\" + path + "  |  " + name
         });
+    }
+}
+
+internal sealed class AutomaticGames
+{
+    public readonly bool Enabled;
+    public readonly List<string> Paths;
+
+    public AutomaticGames(bool enabled, IEnumerable<string> paths)
+    {
+        Enabled = enabled;
+        Paths = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string raw in paths)
+        {
+            if (String.IsNullOrWhiteSpace(raw) || raw.Length < 3 || !Char.IsLetter(raw[0]) ||
+                raw[1] != ':' || (raw[2] != '\\' && raw[2] != '/') ||
+                !String.Equals(Path.GetExtension(raw), ".exe", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("L'avvio automatico accetta solo file .exe locali.");
+            string full = Path.GetFullPath(raw);
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\') + "\\";
+            if (full.StartsWith(windows, StringComparison.OrdinalIgnoreCase) ||
+                PriorityAction.IsProtectedName(Path.GetFileNameWithoutExtension(full)))
+                throw new InvalidDataException("I componenti di Windows e le protezioni sono esclusi dall'avvio automatico.");
+            if (seen.Add(full)) Paths.Add(full);
+            if (Paths.Count > 32) throw new InvalidDataException("Puoi spuntare fino a 32 eseguibili.");
+        }
+    }
+
+    public static AutomaticGames Read(string path)
+    {
+        if (!File.Exists(path)) return new AutomaticGames(false, new string[0]);
+        if (new FileInfo(path).Length > 32768) throw new InvalidDataException("Elenco automatico troppo grande.");
+        string[] fields = File.ReadAllLines(path);
+        bool enabled;
+        if (fields.Length < 2 || fields[0] != "MatrixAutomatic/1" || !Boolean.TryParse(fields[1], out enabled))
+            throw new InvalidDataException("Elenco automatico non valido.");
+        var paths = new List<string>();
+        for (int i = 2; i < fields.Length; i++) paths.Add(fields[i]);
+        return new AutomaticGames(enabled, paths);
+    }
+
+    public void Save(string path)
+    {
+        string folder = Path.GetDirectoryName(path);
+        Directory.CreateDirectory(folder);
+        string pending = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".tmp");
+        var lines = new List<string> { "MatrixAutomatic/1", Enabled.ToString() };
+        lines.AddRange(Paths);
+        try
+        {
+            File.WriteAllLines(pending, lines);
+            if (File.Exists(path)) File.Replace(pending, path, null);
+            else File.Move(pending, path);
+        }
+        finally { if (File.Exists(pending)) File.Delete(pending); }
+    }
+
+    public Process Detect(out string matched)
+    {
+        matched = null;
+        if (!Enabled) return null;
+        foreach (string path in Paths)
+        {
+            Process game = Optimizer.FindGame(path);
+            if (game == null) continue;
+            matched = path;
+            return game;
+        }
+        return null;
     }
 }
