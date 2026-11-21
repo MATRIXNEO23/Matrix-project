@@ -98,3 +98,9 @@ Build Windows 10 x64: 58.368 byte, SHA-256 `F637E4BC7DC0D58B609589AF26FF9FF18FE9
 ### Condizioni per completare l'ordine
 
 Mancano la preselezione delle singole voci basata su benefici ripetibili, il catalogo storico completo, le prove reali su Steam e 4 GB, la verifica del riavvio a freddo e la calibrazione GPU. Servizi, piano energetico, affinità, browser e shell restano senza adapter attivo finché ciascuna modifica non ha un ripristino verificato e una misura di beneficio. Per la GPU occorrono driver e hardware su cui validare la lettura, il limite termico e il recupero dopo una modifica, poi consenso specifico alla calibrazione. Per servizi e shell occorre un ambiente sacrificabile che consenta anche il test di errore e interruzione. Le prove Minecraft già registrate non hanno mostrato un miglioramento ripetibile.
+
+### Ripristino in condizioni di errore
+
+Build di 59.904 byte, SHA-256 `B5A3442C63846A871766AB3EED7717FA8A75ACB6DD9DBB42E7029C2174683C88`. In tre esecuzioni su Windows 10 Home 22H2, i nuovi test mantengono il journal corrotto per diagnosi, impediscono di cambiare priorità se il journal non può essere scritto, ignorano registri riferiti a un PID con ora di avvio o percorso diversi e ripristinano ancora un journal valido del formato precedente. I test usano soltanto processi creati dalla fixture.
+
+Sul PC, virtualizzazione firmware, EPT e VM Monitor Mode risultano disponibili. Windows Sandbox non è supportato nell'edizione Home. Non è stato trovato un hypervisor già predisposto. Restano senza collaudo in una vera VM i test su servizi, shell e riavvio a freddo. La RAM di una VM configurata a 4 GB consente test funzionali, ma non rappresenta da sola la fluidità su hardware fisico con 4 GB.
