@@ -996,7 +996,8 @@ internal sealed class Dashboard : Form
     private Process optional, game, watcher, serviceWorker;
     private EventWaitHandle serviceStop;
     private GameTree gameTree;
-    private string gamePath;
+    private string gamePath, secondaryPath;
+    private bool secondaryAmbiguous;
     private Telemetry previous;
     private bool waitingAfterRestore;
     private bool allowPower, powerTried, allowWindow, windowTried, priorityTried;
@@ -1133,6 +1134,10 @@ internal sealed class Dashboard : Form
         if (allowPower) chosen.Add("energia");
         actionSummary.Text = profile.SelectedIndex == 0 ? "Conservativo · solo anteprima" :
             chosen.Count == 0 ? "Nessuna azione automatica selezionata" : String.Join(", ", chosen.ToArray());
+        if (profile.SelectedIndex != 0 && (allow.Checked || allowWindow || relaunchGame != null) &&
+            (optional == null || optional.HasExited) && !relaunch.Pending)
+            actionSummary.Text += secondaryPath == null ? " · scegli l'app" :
+                secondaryAmbiguous ? " · scelta ambigua" : " · app non aperta";
         actionSummary.ForeColor = Color.FromArgb(190, 204, 220);
     }
 
@@ -1264,7 +1269,7 @@ internal sealed class Dashboard : Form
 
     private GamePreferences CurrentPreferences()
     {
-        return new GamePreferences(profile.SelectedIndex, allow.Checked, allowPower, allowWindow);
+        return new GamePreferences(profile.SelectedIndex, allow.Checked, allowPower, allowWindow, secondaryPath);
     }
 
     private void SetPreferences(GamePreferences preferences)
@@ -1276,6 +1281,7 @@ internal sealed class Dashboard : Form
             allow.Checked = preferences.LowerPriority;
             allowPower = preferences.HighPerformance;
             allowWindow = preferences.Minimize;
+            SetSecondaryPath(preferences.Secondary);
         }
         finally { loadingPreferences = false; }
     }
@@ -1332,7 +1338,7 @@ internal sealed class Dashboard : Form
         if (selected != null) SetGame(selected);
     }
 
-    private string SelectCatalogExecutable(string heading, bool gamesOnly)
+    private string SelectCatalogExecutable(string heading, bool gamesOnly, bool runningOnly = false)
     {
         var catalog = new System.Collections.Generic.List<GameEntry>();
         using (var dialog = new Form { Text = heading, Size = new Size(650, 515), StartPosition = FormStartPosition.CenterParent })
@@ -1362,6 +1368,14 @@ internal sealed class Dashboard : Form
             };
             Action populate = delegate
             {
+                if (runningOnly)
+                {
+                    catalog.AddRange(RunningSecondaryApps());
+                    catalog.Sort((a, b) => StringComparer.CurrentCultureIgnoreCase.Compare(a.Name, b.Name));
+                    searchLabel.Text = "App con finestra aperta  •  " + catalog.Count + " voci";
+                    refresh();
+                    return;
+                }
                 if (scanned == null)
                 {
                     if (scanError != null) { searchLabel.Text = scanError; inventoryTimer.Stop(); }
@@ -1380,7 +1394,7 @@ internal sealed class Dashboard : Form
                 refresh();
             };
             inventoryTimer.Tick += delegate { populate(); };
-            if (scanned == null) inventoryTimer.Start();
+            if (scanned == null && !runningOnly) inventoryTimer.Start();
             else populate();
             search.TextChanged += delegate { refresh(); };
             select.Click += delegate { if (list.SelectedItem != null) dialog.DialogResult = DialogResult.OK; };
@@ -1440,7 +1454,7 @@ internal sealed class Dashboard : Form
         using (var actionOption = new CheckBox { Text = "Consenti riduzione temporanea della priorità", Dock = DockStyle.Top, Height = 33 })
         using (var demo = new Button { Text = "Apri finestra di prova", Dock = DockStyle.Bottom, Height = 35 })
         using (var services = new Panel { Dock = DockStyle.Bottom, Height = 37 })
-        using (var chooseOptional = new Button { Text = "Avvia app secondaria", Width = 186, Dock = DockStyle.Fill })
+        using (var chooseOptional = new Button { Text = "Scegli app secondaria", Width = 186, Dock = DockStyle.Fill })
         using (var searchPause = new Button { Text = "Pausa Windows Search", Width = 205, Dock = DockStyle.Left })
         using (var searchRestore = new Button { Text = "Ripristina servizio", Width = 172, Dock = DockStyle.Right })
         {
@@ -1474,9 +1488,10 @@ internal sealed class Dashboard : Form
                 if (!restart.Checked) { relaunchGame = null; if (relaunch.Pending) Recover("Ripristino richiesto."); return; }
                 try
                 {
+                    FindExistingSecondary();
                     if (gamePath == null || optional == null || optional.HasExited ||
                         !RelaunchAction.Eligible(optional.MainModule.FileName, optionalDemo))
-                        throw new InvalidOperationException("Scegli il gioco e avvia un'app secondaria compatibile, oppure usa la finestra di prova.");
+                        throw new InvalidOperationException("Scegli il gioco e un'app secondaria aperta compatibile, oppure usa la finestra di prova.");
                     if (MessageBox.Show(dialog, "L'app riceverà una richiesta normale di chiusura. Al ripristino verrà aperta una nuova istanza. Salva prima il lavoro: documenti e finestre interne della vecchia istanza potrebbero non tornare.",
                         "Autorizza questa app", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                     { restart.Checked = false; return; }
@@ -1553,7 +1568,8 @@ internal sealed class Dashboard : Form
                     !allowPower ? "Disabilitato" : powerTried ? "Prova conclusa o piano già attivo" : "Pronto per la prova";
                 if (optional == null || optional.HasExited)
                 {
-                    current.Text = "Apri una finestra di prova per vedere la priorità cambiare e tornare al valore originale.";
+                    current.Text = secondaryPath == null ? "Scegli un'app secondaria aperta o usa la finestra di prova." :
+                        Path.GetFileName(secondaryPath) + (secondaryAmbiguous ? " · più finestre compatibili" : " · finestra non rilevata");
                     return;
                 }
                 try
@@ -1800,31 +1816,109 @@ internal sealed class Dashboard : Form
         gameLabel.Text = "In attesa di " + Path.GetFileName(gamePath);
     }
 
+    private bool IsSecondaryPath(string file)
+    {
+        if (String.IsNullOrWhiteSpace(file) || file.Length < 3 || !Char.IsLetter(file[0]) ||
+            file[1] != ':' || (file[2] != '\\' && file[2] != '/') || !File.Exists(file) ||
+            !String.Equals(Path.GetExtension(file), ".exe", StringComparison.OrdinalIgnoreCase)) return false;
+        string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\') + "\\";
+        return !Path.GetFullPath(file).StartsWith(windows, StringComparison.OrdinalIgnoreCase) &&
+            !PriorityAction.IsProtectedName(Path.GetFileNameWithoutExtension(file)) &&
+            !ExecutableIdentity.Matches(file, Application.ExecutablePath) &&
+            (gamePath == null || !ExecutableIdentity.Matches(file, gamePath));
+    }
+
+    private System.Collections.Generic.List<GameEntry> RunningSecondaryApps()
+    {
+        var entries = new System.Collections.Generic.List<GameEntry>();
+        var seen = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int session;
+        using (var current = Process.GetCurrentProcess()) session = current.SessionId;
+        foreach (var process in Process.GetProcesses())
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.SessionId != session || process.MainWindowHandle == IntPtr.Zero) continue;
+                    string path = process.MainModule.FileName;
+                    if (!IsSecondaryPath(path) || !seen.Add(path)) continue;
+                    string product = FileVersionInfo.GetVersionInfo(path).ProductName;
+                    entries.Add(new GameEntry(String.IsNullOrWhiteSpace(product) ? process.ProcessName : product,
+                        Path.GetDirectoryName(path), path));
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+            }
+        }
+        return entries;
+    }
+
+    private void FindExistingSecondary()
+    {
+        if (optionalDemo || relaunch.Pending || (optional != null && !optional.HasExited)) return;
+        if (optional != null) { optional.Dispose(); optional = null; }
+        if (!IsSecondaryPath(secondaryPath)) return;
+        Process match = null;
+        bool ambiguous = false;
+        int session;
+        using (var current = Process.GetCurrentProcess()) session = current.SessionId;
+        foreach (var candidate in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(secondaryPath)))
+        {
+            bool keep = false;
+            try
+            {
+                if (!candidate.HasExited && candidate.SessionId == session &&
+                    candidate.MainWindowHandle != IntPtr.Zero &&
+                    ExecutableIdentity.Matches(candidate.MainModule.FileName, secondaryPath))
+                {
+                    if (match == null) { match = candidate; keep = true; }
+                    else ambiguous = true;
+                }
+            }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
+            finally { if (!keep) candidate.Dispose(); }
+        }
+        if (ambiguous)
+        {
+            if (match != null) match.Dispose();
+            secondaryAmbiguous = true;
+            return;
+        }
+        secondaryAmbiguous = false;
+        optional = match;
+    }
+
     private void StartOptional(object sender, EventArgs args)
     {
-        if (optional != null && !optional.HasExited) { status.Text = "L'app secondaria è già attiva."; return; }
-        string selected = SelectCatalogExecutable("Avvia app secondaria", false);
+        if (gamePath == null) { status.Text = "Scegli prima il gioco."; return; }
+        if (enabled.Checked && !waitingAfterRestore) { status.Text = "Spegni il boost prima di cambiare app."; return; }
+        string selected = SelectCatalogExecutable("Scegli app secondaria", false, true);
         if (selected == null) return;
-        string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\') + "\\";
-        if (selected.StartsWith(windows, StringComparison.OrdinalIgnoreCase) ||
-            (gamePath != null && ExecutableIdentity.Matches(selected, gamePath)) ||
-            ExecutableIdentity.Matches(selected, Application.ExecutablePath))
+        if (!IsSecondaryPath(selected))
         {
             status.Text = "Scegli un'app utente distinta dal gioco e dall'ottimizzatore.";
             return;
         }
-        try
-        {
-            if (!Recover("App secondaria pronta.")) return;
-            if (optional != null) { optional.Dispose(); optional = null; }
-            optionalDemo = false;
-            relaunchGame = null;
-            optional = Process.Start(new ProcessStartInfo(selected) {
-                UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(selected)
-            });
-            status.Text = "App secondaria avviata: " + Path.GetFileName(selected);
-        }
-        catch (Exception error) { status.Text = error.Message; }
+        if (!Recover("Stato originale ripristinato.")) return;
+        SetSecondaryPath(selected);
+        SavePreferences();
+        FindExistingSecondary();
+        status.Text = optional == null ? "App salvata. Verrà cercata quando sarà aperta." : "App selezionata: " + Path.GetFileName(selected);
+        RefreshPrimaryControls();
+    }
+
+    private void SetSecondaryPath(string value)
+    {
+        if (String.Equals(value, secondaryPath, StringComparison.OrdinalIgnoreCase) && !optionalDemo) return;
+        if (optional != null) { optional.Dispose(); optional = null; }
+        optionalDemo = false;
+        relaunchGame = null;
+        secondaryAmbiguous = false;
+        secondaryPath = value;
     }
 
     private void Inventory(object sender, EventArgs args)
@@ -2021,6 +2115,7 @@ internal sealed class Dashboard : Form
             if (gamePath != null) gameLabel.Text = (game == null ? "In attesa di " : automaticSession ? "Sessione automatica: " : "Gioco attivo: ") +
                 Path.GetFileName(gamePath);
 
+            FindExistingSecondary();
             RefreshPrimaryControls();
             bool sessionReady = game != null && enabled.Checked && !waitingAfterRestore;
             if (!sessionReady || profile.SelectedIndex == 0) StopManagedService();
