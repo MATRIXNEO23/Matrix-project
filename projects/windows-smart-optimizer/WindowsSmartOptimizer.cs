@@ -1013,7 +1013,8 @@ internal sealed class Dashboard : Form
     private readonly List<Process> closingApps = new List<Process>();
     private ulong batchRamBefore;
     private string batchSkipped;
-    private bool pauseSearchDuringBoost, searchTried;
+    private int boostServices;
+    private bool searchTried;
     private const int BoostHotkeyId = 1;
     private const int HotkeyMessage = 0x0312;
 
@@ -1179,7 +1180,7 @@ internal sealed class Dashboard : Form
         List<string> selected;
         if (gamePath != null && boostApps.TryGetValue(gamePath, out selected) && selected.Count > 0)
             chosen.Add(selected.Count + " app da chiudere");
-        if (pauseSearchDuringBoost) chosen.Add("indicizzazione");
+        if (boostServices != 0) chosen.Add("servizi selezionati");
         actionSummary.Text = profile.SelectedIndex == 0 ? "Conservativo · solo anteprima" :
             chosen.Count == 0 ? "Nessuna azione automatica selezionata" : String.Join(", ", chosen.ToArray());
         if (profile.SelectedIndex != 0 && (allow.Checked || allowWindow || relaunchGame != null) &&
@@ -1489,7 +1490,7 @@ internal sealed class Dashboard : Form
         if (serviceStop != null) serviceStop.Set();
     }
 
-    private void StartSearchBoost(bool configured)
+    private void StartSearchBoost(int selection, bool configured)
     {
         if (game == null || game.HasExited || !enabled.Checked || profile.SelectedIndex == 0 || waitingAfterRestore)
         {
@@ -1505,7 +1506,7 @@ internal sealed class Dashboard : Form
             if (serviceStop != null) serviceStop.Dispose();
             string token = Guid.NewGuid().ToString("N");
             serviceStop = ServiceBoost.CreateStopSignal(token);
-            using (var owner = Process.GetCurrentProcess()) serviceWorker = ServiceBoost.RunElevated(owner, game, token);
+            using (var owner = Process.GetCurrentProcess()) serviceWorker = ServiceBoost.RunElevated(owner, game, token, selection);
         }
         catch (Exception error) { status.Text = "Windows Search: " + error.Message; }
     }
@@ -1525,18 +1526,27 @@ internal sealed class Dashboard : Form
         using (var chooseOptional = new Button { Text = "Scegli app secondaria", Width = 186, Dock = DockStyle.Fill })
         using (var chooseBatch = new Button { Text = "App da chiudere e riaprire", Dock = DockStyle.Top, Height = 35 })
         using (var searchOption = new CheckBox { Text = "Sospendi l’indicizzazione di Windows durante il boost (richiede UAC)", Dock = DockStyle.Top, Height = 33 })
+        using (var printing = new CheckBox { Text = "Sospendi la stampa durante il boost (richiede UAC)", Dock = DockStyle.Top, Height = 29 })
+        using (var prefetch = new CheckBox { Text = "Sospendi il precaricamento SysMain durante il boost (richiede UAC)", Dock = DockStyle.Top, Height = 29 })
         using (var searchPause = new Button { Text = "Pausa Windows Search", Width = 205, Dock = DockStyle.Left })
         using (var searchRestore = new Button { Text = "Ripristina servizio", Width = 172, Dock = DockStyle.Right })
         {
             chooseBatch.Click += ShowBoostApps;
             dialog.Controls.Add(chooseBatch);
-            searchOption.Checked = pauseSearchDuringBoost;
-            searchOption.CheckedChanged += delegate
+            searchOption.Checked = (boostServices & 1) != 0;
+            printing.Checked = (boostServices & 2) != 0;
+            prefetch.Checked = (boostServices & 4) != 0;
+            EventHandler saveServices = delegate
             {
-                pauseSearchDuringBoost = searchOption.Checked;
-                searchTried = false;
-                if (!pauseSearchDuringBoost) StopManagedService();
+                boostServices = (searchOption.Checked ? 1 : 0) | (printing.Checked ? 2 : 0) | (prefetch.Checked ? 4 : 0);
+                RefreshPrimaryControls();
             };
+            searchOption.CheckedChanged += saveServices;
+            printing.CheckedChanged += saveServices;
+            prefetch.CheckedChanged += saveServices;
+            searchOption.Enabled = printing.Enabled = prefetch.Enabled = !enabled.Checked;
+            dialog.Controls.Add(prefetch);
+            dialog.Controls.Add(printing);
             dialog.Controls.Add(searchOption);
             actionOption.Checked = allow.Checked;
             actionOption.CheckedChanged += delegate { allow.Checked = actionOption.Checked; };
@@ -1588,17 +1598,17 @@ internal sealed class Dashboard : Form
             details.Items.Add(windowRow);
             var restartRow = new ListViewItem(new[] { "App secondaria", "Chiudi e riapri dopo il boost", "Disabilitata" });
             details.Items.Add(restartRow);
-            var searchRow = new ListViewItem(new[] { "Servizi Windows", "Pausa indicizzazione Windows Search", "Facoltativa" });
+            var searchRow = new ListViewItem(new[] { "Servizi Windows", "Sospendi e ripristina la selezione", "Facoltativa" });
             details.Items.Add(searchRow);
             services.Controls.Add(chooseOptional);
             services.Controls.Add(searchPause);
             services.Controls.Add(searchRestore);
             chooseOptional.Click += delegate { StartOptional(sender, args); };
-            searchPause.Click += delegate { searchTried = true; StartSearchBoost(false); };
+            searchPause.Click += delegate { searchTried = true; StartSearchBoost(1, false); };
             searchRestore.Click += delegate
             {
                 if (serviceWorker != null && !serviceWorker.HasExited) { StopManagedService(); return; }
-                if (!File.Exists(Path.Combine(action.StateFolder, "search.pending"))) return;
+                if (!ServiceBoost.Pending(action.StateFolder)) return;
                 try
                 {
                     if (serviceWorker != null) serviceWorker.Dispose();
@@ -1623,19 +1633,13 @@ internal sealed class Dashboard : Form
                     action.Pending ? "Priorità ridotta" : "In attesa delle condizioni";
                 live.SubItems[2].Text = state;
                 bool workerActive = serviceWorker != null && !serviceWorker.HasExited;
-                bool pendingSearch = File.Exists(Path.Combine(action.StateFolder, "search.pending"));
+                bool pendingSearch = ServiceBoost.Pending(action.StateFolder);
                 searchRow.SubItems[2].Text = pendingSearch ? (workerActive ? "Intervento o ripristino in corso" : "Ripristino richiesto") :
                     workerActive ? "Verifica in corso" : "Facoltativa";
                 if (pendingSearch && workerActive)
                 {
-                    try
-                    {
-                        using (var controller = new System.ServiceProcess.ServiceController(ServiceBoost.Search))
-                            if (controller.Status == System.ServiceProcess.ServiceControllerStatus.Stopped)
-                                searchRow.SubItems[2].Text = "Arrestato · ripristino disponibile";
-                    }
-                    catch (InvalidOperationException) { }
-                    catch (System.ComponentModel.Win32Exception) { }
+                    string paused = ServiceBoost.PausedServices(action.StateFolder);
+                    if (paused.Length > 0) searchRow.SubItems[2].Text = "Sospesi: " + paused;
                 }
                 searchPause.Enabled = !workerActive && !pendingSearch;
                 searchRestore.Enabled = workerActive || pendingSearch;
@@ -2264,11 +2268,11 @@ internal sealed class Dashboard : Form
             }
             CloseBoostApps(now);
             ShowClosureResults(now);
-            if (pauseSearchDuringBoost && !searchTried && profile.SelectedIndex != 0 &&
+            if (boostServices != 0 && !searchTried && profile.SelectedIndex != 0 &&
                 (serviceWorker == null || serviceWorker.HasExited))
             {
                 searchTried = true;
-                StartSearchBoost(true);
+                StartSearchBoost(boostServices, true);
             }
             if (relaunch.Pending && ramBeforeClose.HasValue && optional != null && optional.HasExited)
             {
