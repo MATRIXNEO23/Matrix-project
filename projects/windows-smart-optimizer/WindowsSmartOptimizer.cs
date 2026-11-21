@@ -53,7 +53,26 @@ internal static class Optimizer
         {
             using (owner)
             {
-                try { if (owner.StartTime.ToFileTimeUtc() == ownerStart) owner.WaitForExit(); }
+                try
+                {
+                    if (owner.StartTime.ToFileTimeUtc() == ownerStart)
+                    {
+                        var transaction = new PriorityAction(state);
+                        try
+                        {
+                            using (var ready = EventWaitHandle.OpenExisting(WatchReadyName(ownerId, ownerStart)))
+                                ready.Set();
+                        }
+                        catch (WaitHandleCannotBeOpenedException) { }
+                        while (!owner.WaitForExit(1000))
+                        {
+                            try { transaction.RestoreExpired(DateTime.UtcNow); }
+                            catch (IOException) { }
+                            catch (UnauthorizedAccessException) { }
+                            catch (System.ComponentModel.Win32Exception) { }
+                        }
+                    }
+                }
                 catch (InvalidOperationException) { }
             }
         }
@@ -69,13 +88,27 @@ internal static class Optimizer
         }
     }
 
+    private static string WatchReadyName(int pid, long start)
+    {
+        return String.Format(CultureInfo.InvariantCulture, @"Local\Matrix.Optimizer.Ready.{0}.{1}", pid, start);
+    }
+
     public static Process StartWatcher()
     {
         using (var owner = Process.GetCurrentProcess())
-            return Process.Start(new ProcessStartInfo(Application.ExecutablePath,
-                String.Format(CultureInfo.InvariantCulture, "--watch {0} {1}", owner.Id, owner.StartTime.ToFileTimeUtc())) {
-                    UseShellExecute = false, CreateNoWindow = true
-                });
+        {
+            long start = owner.StartTime.ToFileTimeUtc();
+            using (var ready = new EventWaitHandle(false, EventResetMode.AutoReset, WatchReadyName(owner.Id, start)))
+            {
+                var watcher = Process.Start(new ProcessStartInfo(Application.ExecutablePath,
+                    String.Format(CultureInfo.InvariantCulture, "--watch {0} {1}", owner.Id, start)) {
+                        UseShellExecute = false, CreateNoWindow = true
+                    });
+                if (watcher != null && ready.WaitOne(3000) && !watcher.HasExited) return watcher;
+                if (watcher != null) watcher.Dispose();
+                throw new IOException("Il controllo di ripristino non ha confermato la disponibilità.");
+            }
+        }
     }
 
     public static Process FindGame(string path)
@@ -141,8 +174,21 @@ internal static class Optimizer
                     if (recovery != 0 || worker.PriorityClass != initial || action.Pending)
                         throw new Exception("Ripristino dopo arresto del proprietario non riuscito.");
                 }
+                action.Apply(worker);
+                action.RestoreExpired(DateTime.UtcNow);
+                if (!action.Pending) throw new Exception("Il watchdog ha anticipato la scadenza.");
+                action.RestoreExpired(DateTime.UtcNow.AddSeconds(16));
+                worker.Refresh();
+                if (worker.PriorityClass != initial || action.Pending) throw new Exception("Scadenza non rispettata.");
+                action.Apply(worker);
+                worker.PriorityClass = ProcessPriorityClass.Idle;
+                action.Restore();
+                worker.Refresh();
+                if (worker.PriorityClass != ProcessPriorityClass.Idle || action.Pending)
+                    throw new Exception("Modifica concorrente sovrascritta.");
+                worker.PriorityClass = initial;
                 File.WriteAllText(Path.Combine(directory, "result.txt"),
-                    "OK: telemetria, rilevamento/uscita gioco simulato, priorità, ripristino, recupero journal e arresto del proprietario.");
+                    "OK: telemetria, rilevamento/uscita gioco simulato, priorità, ripristino, recupero journal, arresto proprietario, scadenza e modifica concorrente.");
             }
             finally
             {
@@ -189,9 +235,30 @@ internal static class ExecutableIdentity
 
 internal sealed class PriorityAction
 {
-    private readonly string journal;
-    public PriorityAction(string folder) { journal = Path.Combine(folder, "priority.pending"); }
+    private readonly string journal, mutexName;
+
+    public PriorityAction(string folder)
+    {
+        journal = Path.Combine(Path.GetFullPath(folder), "priority.pending");
+        using (var hash = System.Security.Cryptography.SHA256.Create())
+            mutexName = @"Local\Matrix.Optimizer.Undo." + Convert.ToBase64String(
+                hash.ComputeHash(System.Text.Encoding.UTF8.GetBytes(journal.ToUpperInvariant()))).Replace('/', '_');
+    }
+
+    private void Locked(Action work)
+    {
+        using (var mutex = new Mutex(false, mutexName))
+        {
+            bool entered;
+            try { entered = mutex.WaitOne(3000); }
+            catch (AbandonedMutexException) { entered = true; }
+            if (!entered) throw new IOException("Registro di ripristino occupato.");
+            try { work(); }
+            finally { mutex.ReleaseMutex(); }
+        }
+    }
     public bool Pending { get { return File.Exists(journal); } }
+    public string StateFolder { get { return Path.GetDirectoryName(journal); } }
 
     public void Record(string outcome, Telemetry before, Telemetry after)
     {
@@ -200,14 +267,27 @@ internal sealed class PriorityAction
         File.AppendAllText(Path.Combine(Path.GetDirectoryName(journal), "misure.tsv"), line + Environment.NewLine);
     }
 
-    public void Apply(Process process)
+    public void Apply(Process process) { Locked(delegate { ApplyCore(process); }); }
+
+    private void ApplyCore(Process process)
     {
         if (Pending) throw new InvalidOperationException("Ripristina prima l'intervento precedente.");
+        process.Refresh();
+        if (process.HasExited || process.SessionId == 0) throw new InvalidOperationException("Processo non gestibile.");
+        IntPtr processHandle = process.Handle; // Mantiene l'identità del processo fino al rilascio.
+        if (processHandle == IntPtr.Zero || process.HasExited) throw new InvalidOperationException("Processo terminato.");
         string path = process.MainModule.FileName;
+        string name = Path.GetFileNameWithoutExtension(path);
+        string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\') + "\\";
+        if (path.StartsWith(windows, StringComparison.OrdinalIgnoreCase) || IsProtectedName(name))
+            throw new InvalidOperationException("Sistema o protezione esclusi dall'intervento.");
         var original = process.PriorityClass;
         if (original != ProcessPriorityClass.Normal) return;
         string record = String.Join("\n", process.Id.ToString(CultureInfo.InvariantCulture),
-            process.StartTime.ToFileTimeUtc().ToString(CultureInfo.InvariantCulture), path);
+            process.StartTime.ToFileTimeUtc().ToString(CultureInfo.InvariantCulture), path,
+            Guid.NewGuid().ToString("D"), ((int)original).ToString(CultureInfo.InvariantCulture),
+            ((int)ProcessPriorityClass.BelowNormal).ToString(CultureInfo.InvariantCulture),
+            DateTime.UtcNow.AddSeconds(15).Ticks.ToString(CultureInfo.InvariantCulture));
         Directory.CreateDirectory(Path.GetDirectoryName(journal));
         string temporary = journal + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -225,15 +305,40 @@ internal sealed class PriorityAction
         process.PriorityClass = ProcessPriorityClass.BelowNormal;
     }
 
-    public void Restore()
+    public static bool IsProtectedName(string name)
+    {
+        return String.Equals(name, "explorer", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(name, "MsMpEng", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(name, "NisSrv", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(name, "MpDefenderCoreService", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public void Restore() { Locked(delegate { RestoreCore(null); }); }
+
+    public void RestoreExpired(DateTime now) { Locked(delegate { RestoreCore(now); }); }
+
+    private void RestoreCore(DateTime? expireBefore)
     {
         if (!Pending) return;
         var fields = File.ReadAllLines(journal);
         int id;
         long start;
-        if (fields.Length != 3 || !Int32.TryParse(fields[0], out id) ||
+        if ((fields.Length != 3 && fields.Length != 7) || !Int32.TryParse(fields[0], out id) ||
             !Int64.TryParse(fields[1], out start) || !Path.IsPathRooted(fields[2]))
             throw new InvalidDataException("Registro di ripristino non valido.");
+        if (fields.Length == 7)
+        {
+            Guid sessionId;
+            int original, applied;
+            long deadline;
+            if (!Guid.TryParseExact(fields[3], "D", out sessionId) ||
+                !Int32.TryParse(fields[4], out original) || original != (int)ProcessPriorityClass.Normal ||
+                !Int32.TryParse(fields[5], out applied) || applied != (int)ProcessPriorityClass.BelowNormal ||
+                !Int64.TryParse(fields[6], out deadline) || deadline <= 0 || deadline > DateTime.MaxValue.Ticks)
+                throw new InvalidDataException("Dati di ripristino non validi.");
+            if (expireBefore.HasValue && deadline > expireBefore.Value.Ticks) return;
+        }
+        else if (expireBefore.HasValue) return;
         Process process;
         try { process = Process.GetProcessById(id); }
         catch (ArgumentException) { File.Delete(journal); return; }
@@ -243,8 +348,13 @@ internal sealed class PriorityAction
             {
                 if (!process.HasExited && process.StartTime.ToFileTimeUtc() == start &&
                     String.Equals(process.MainModule.FileName, fields[2], StringComparison.OrdinalIgnoreCase) &&
-                    process.PriorityClass == ProcessPriorityClass.BelowNormal)
-                    process.PriorityClass = ProcessPriorityClass.Normal;
+                    !IsProtectedName(process.ProcessName))
+                {
+                    IntPtr processHandle = process.Handle;
+                    if (processHandle != IntPtr.Zero && !process.HasExited &&
+                        process.PriorityClass == ProcessPriorityClass.BelowNormal)
+                        process.PriorityClass = ProcessPriorityClass.Normal;
+                }
             }
             catch (InvalidOperationException) { if (!process.HasExited) throw; }
         }
@@ -370,6 +480,9 @@ internal sealed class Dashboard : Form
     private string gamePath;
     private Telemetry previous;
     private bool waitingAfterRestore;
+    private MachineInventory scanned;
+    private string scanError;
+    private bool loadingPreferences;
     private int busySamples;
     private Telemetry beforeAction;
     private readonly Stopwatch actionTime = new Stopwatch();
@@ -378,8 +491,8 @@ internal sealed class Dashboard : Form
     {
         this.action = action;
         Text = "Windows Smart Optimizer";
-        ClientSize = new Size(700, 425);
-        MinimumSize = new Size(710, 465);
+        ClientSize = new Size(700, 532);
+        MinimumSize = new Size(710, 572);
         BackColor = Color.FromArgb(23, 27, 35);
         ForeColor = Color.FromArgb(233, 237, 245);
         Font = new Font("Segoe UI", 10);
@@ -407,13 +520,21 @@ internal sealed class Dashboard : Form
         shortcut.CheckedChanged += delegate { UpdateShortcut(); };
         enabled.CheckedChanged += delegate { if (!enabled.Checked) Recover("Boost spento. Priorità originale ripristinata."); };
         allow.CheckedChanged += delegate { if (!allow.Checked) Recover("Intervento disabilitato. Priorità originale ripristinata."); };
-        Add(status, 24, 351, 650, 58);
+        Add(Button("Attiva Boost", ActivateBoost), 24, 344, 140, 34);
+        Add(Button("Disattiva e ripristina", DeactivateBoost), 175, 344, 190, 34);
+        Add(Button("Analisi del PC", ShowInventory), 377, 344, 125, 34);
+        Add(Button("Ripristino d'emergenza", Restore), 514, 344, 160, 34);
+        Add(Button("Importa profilo", ImportProfile), 24, 392, 140, 34);
+        Add(Button("Esporta profilo", ExportProfile), 175, 392, 140, 34);
+        Add(status, 24, 446, 650, 62);
+        profile.SelectedIndexChanged += delegate { SavePreferences(); };
+        allow.CheckedChanged += delegate { SavePreferences(); };
         gameLabel.Text = "Gioco non configurato";
         status.Text = "Scegli un gioco e avvia un'app secondaria da questa finestra.";
         if (action.Pending) Recover("Intervento precedente ripristinato.");
         timer.Interval = 3000;
         timer.Tick += delegate { Sample(); };
-        Shown += delegate { Sample(); timer.Start(); };
+        Shown += delegate { Sample(); timer.Start(); ScanMachine(); };
         FormClosing += delegate {
             timer.Stop();
             ReleaseShortcut();
@@ -426,6 +547,130 @@ internal sealed class Dashboard : Form
             if (game != null) game.Dispose();
             if (watcher != null) watcher.Dispose();
         };
+    }
+
+    private void ActivateBoost(object sender, EventArgs args)
+    {
+        if (gamePath == null) { status.Text = "Scegli prima il gioco."; return; }
+        if (!Recover("Ripristino precedente verificato.")) return;
+        waitingAfterRestore = false;
+        enabled.Checked = true;
+        status.Text = "Boost attivo. Si applicano il profilo e le autorizzazioni correnti.";
+    }
+
+    private void DeactivateBoost(object sender, EventArgs args)
+    {
+        waitingAfterRestore = true;
+        enabled.Checked = false;
+        Recover("Boost spento. Priorità ripristinata.");
+        if (!action.Pending && beforeAction == null) status.Text = "Boost spento.";
+    }
+
+    private void ScanMachine()
+    {
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            MachineInventory snapshot = null;
+            string failure = null;
+            try { snapshot = MachineInventory.Scan(); }
+            catch (Exception error) { failure = error.Message; }
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    scanned = snapshot;
+                    scanError = failure;
+                    if (snapshot != null && gamePath == null && snapshot.Launchers.Count == 1)
+                    {
+                        gamePath = snapshot.Launchers[0];
+                        LoadPreferences();
+                        gameLabel.Text = "Gioco rilevato: " + Path.GetFileName(gamePath);
+                    }
+                });
+            }
+            catch (InvalidOperationException) { } // Dashboard chiusa durante la scansione.
+        });
+    }
+
+    private void ShowInventory(object sender, EventArgs args)
+    {
+        if (scanned == null)
+        {
+            status.Text = scanError ?? "Scansione del PC in corso.";
+            return;
+        }
+        using (var dialog = new Form { Text = "Analisi del PC", Size = new Size(895, 550), StartPosition = FormStartPosition.CenterParent })
+        using (var tabs = new TabControl { Dock = DockStyle.Fill })
+        {
+            scanned.AddTabs(tabs);
+            dialog.Controls.Add(tabs);
+            dialog.ShowDialog(this);
+        }
+    }
+
+
+    private string PreferencesPath { get { return GamePreferences.PathFor(action.StateFolder, gamePath); } }
+
+    private GamePreferences CurrentPreferences()
+    {
+        return new GamePreferences(profile.SelectedIndex, allow.Checked);
+    }
+
+    private void SetPreferences(GamePreferences preferences)
+    {
+        loadingPreferences = true;
+        try
+        {
+            profile.SelectedIndex = preferences.Level;
+            allow.Checked = preferences.LowerPriority;
+        }
+        finally { loadingPreferences = false; }
+    }
+
+    private void LoadPreferences()
+    {
+        SetPreferences(new GamePreferences(0, false));
+        try { if (File.Exists(PreferencesPath)) SetPreferences(GamePreferences.Read(PreferencesPath)); }
+        catch (IOException) { status.Text = "Profilo non leggibile. Impostazioni conservative."; }
+        catch (UnauthorizedAccessException) { status.Text = "Profilo non accessibile. Impostazioni conservative."; }
+    }
+
+    private void SavePreferences()
+    {
+        if (loadingPreferences || gamePath == null) return;
+        try { CurrentPreferences().Save(PreferencesPath); }
+        catch (IOException) { status.Text = "Profilo locale non salvato."; }
+        catch (UnauthorizedAccessException) { status.Text = "Profilo locale non accessibile."; }
+    }
+
+    private void ImportProfile(object sender, EventArgs args)
+    {
+        if (gamePath == null) { status.Text = "Scegli prima il gioco."; return; }
+        using (var dialog = new OpenFileDialog { Filter = "Profilo Matrix (*.matrixprofile)|*.matrixprofile" })
+        {
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            try
+            {
+                var imported = GamePreferences.Read(dialog.FileName);
+                if (!Recover("Ripristino precedente verificato.")) return;
+                enabled.Checked = false;
+                SetPreferences(imported);
+                status.Text = "Profilo importato. Il boost resta spento.";
+                SavePreferences();
+            }
+            catch (Exception error) { status.Text = "Importazione: " + error.Message; }
+        }
+    }
+
+    private void ExportProfile(object sender, EventArgs args)
+    {
+        if (gamePath == null) { status.Text = "Scegli prima il gioco."; return; }
+        using (var dialog = new SaveFileDialog { Filter = "Profilo Matrix (*.matrixprofile)|*.matrixprofile", AddExtension = true, OverwritePrompt = true })
+        {
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            try { CurrentPreferences().Save(dialog.FileName); status.Text = "Profilo esportato."; }
+            catch (Exception error) { status.Text = "Esportazione: " + error.Message; }
+        }
     }
 
     private void UpdateShortcut()
@@ -504,7 +749,10 @@ internal sealed class Dashboard : Form
         }
         if (!Recover("Gioco configurato.")) return;
         if (game != null) { game.Dispose(); game = null; }
+        enabled.Checked = false;
+        waitingAfterRestore = false;
         gamePath = selected;
+        LoadPreferences();
         gameLabel.Text = "In attesa di " + Path.GetFileName(gamePath);
     }
 
@@ -687,6 +935,14 @@ internal sealed class Dashboard : Form
                 if (watcher != null) watcher.Dispose();
                 watcher = Optimizer.StartWatcher();
                 if (watcher == null || watcher.HasExited) throw new InvalidOperationException("Ripristino automatico non disponibile.");
+            }
+            if (actionTime.IsRunning && !action.Pending)
+            {
+                waitingAfterRestore = true;
+                actionTime.Reset();
+                beforeAction = null;
+                status.Text = "Intervento terminato dal controllo di ripristino.";
+                return;
             }
             if (action.Pending)
             {
